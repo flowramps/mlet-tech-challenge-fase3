@@ -28,7 +28,10 @@ class Settings(BaseSettings):
     model_backend: str = "sklearn"
     model_version: str = "1.0.0"
 
-    min_f1_macro: float = 0.0
+    # Piso de qualidade para promover um modelo recém-treinado. Calibrado em 0,53 a partir
+    # do f1-macro de validação do campeão (0,5869), com margem de 0,05 para absorver a
+    # variação natural entre retreinos sem transformar o gate em enfeite que sempre passa.
+    min_f1_macro: float = 0.53
     random_seed: int = 42
     validation_size: float = 0.2
 
