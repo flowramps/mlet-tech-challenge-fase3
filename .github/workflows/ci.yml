@@ -91,6 +91,11 @@ jobs:
       - name: Treinar o modelo
         run: poetry run python -m triagem.pipeline.training
 
+      # O cache de build do Actions só funciona no driver `docker-container` do buildx; o
+      # driver padrão do runner é `docker`, que não exporta cache.
+      - name: Preparar o buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Construir a imagem
         uses: docker/build-push-action@v6
         with:
