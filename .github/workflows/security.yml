@@ -50,7 +50,7 @@ jobs:
       # projeto por algo fora do nosso controle. `ignore-unfixed` já filtra o que não tem
       # remediação; o relatório fica no log para decisão consciente.
       - name: Escanear vulnerabilidades
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: triagem-api:scan
           format: table
