@@ -6,8 +6,11 @@ __pycache__/
 .coverage
 htmlcov/
 .env
+.claude/
 
-# Artefatos reproduzíveis por `make train` — não versionados
-data/
-models/
-metrics/
+# Artefatos reproduzíveis por `make train` — não versionados.
+# A barra inicial ancora o padrão na raiz do repositório: sem ela, `data/` também
+# casaria com `src/triagem/data/` e `tests/data/`, excluindo código-fonte do git.
+/data/
+/models/
+/metrics/
