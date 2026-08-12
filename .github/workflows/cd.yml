@@ -1,0 +1,60 @@
+# Entrega da imagem para o registry. Roda somente por acionamento manual: a decisão
+# arquitetural desta fase foi documentar e preparar o deploy em nuvem sem provisionar
+# recursos, então o gatilho automático fica desligado de propósito.
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag da imagem a publicar"
+        required: true
+        default: "latest"
+
+env:
+  PYTHON_VERSION: "3.12"
+  POETRY_VERSION: "2.3.2"
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    name: Publicar imagem
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Instalar Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Instalar dependências
+        run: poetry install --no-interaction
+
+      - name: Treinar o modelo que vai na imagem
+        run: poetry run python -m triagem.pipeline.training
+
+      - name: Autenticar no registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construir e publicar
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ inputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
