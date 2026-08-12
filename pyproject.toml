@@ -39,3 +39,9 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra --strict-markers"
+filterwarnings = [
+    # Vem de dentro do joblib, que ainda usa `array.shape = ...` — API depreciada no
+    # numpy 2.5. A 1.5.3 é a versão mais recente do joblib e não traz correção, então o
+    # filtro é preciso de propósito: remover assim que houver release que resolva.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
+]
