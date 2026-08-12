@@ -146,6 +146,13 @@ uma categoria guarda-chuva que se sobrepõe semanticamente às outras quatro —
 inflamação cardíaca pertence legitimamente a duas delas. Esse é o teto do problema, não um
 defeito de ajuste: as classes não são mutuamente exclusivas.
 
+**Sobre reprodutibilidade:** as sementes estão fixadas, mas os valores variam na terceira
+casa decimal entre máquinas diferentes — o mesmo commit rendeu f1-macro 0,5812 localmente e
+0,5802 no runner do CI. A causa é o solver `lbfgs`, sensível à ordem de acumulação em ponto
+flutuante, que depende da biblioteca de álgebra linear e do conjunto de instruções da CPU. A
+variação não altera a escolha do campeão nem a decisão do gate, e é justamente por isso que a
+margem do piso de qualidade é de 0,05 e não de 0,005.
+
 ### Latência (baseline)
 
 Duas medições distintas, que não devem ser confundidas:
