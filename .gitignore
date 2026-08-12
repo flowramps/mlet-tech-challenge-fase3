@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.env
+
+# Artefatos reproduzíveis por `make train` — não versionados
+data/
+models/
+metrics/
