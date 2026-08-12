@@ -161,6 +161,69 @@ as duas é o que permite atribuir corretamente qualquer ganho de otimização fu
 Ambas medidas com 20 requisições de aquecimento descartadas. Sem descartá-las, a primeira
 inferência de um processo frio (43 ms) distorceria a média em uma ordem de grandeza.
 
+## Automação
+
+### Esteira de verificação
+
+| Workflow | Gatilho | O que verifica |
+|---|---|---|
+| `ci.yml` — `lint` | push e PR | Regras de lint e formatação (ruff) |
+| `ci.yml` — `test` | push e PR | Suíte completa com cobertura |
+| `ci.yml` — `build` | push e PR | Treina o modelo, constrói a imagem e confirma que o container responde em `/health` |
+| `security.yml` | push, PR e semanalmente | Vulnerabilidades CRITICAL e HIGH na imagem (Trivy) |
+| `cd.yml` | manual | Publica a imagem no registry |
+
+O job `build` treina o modelo antes de construir a imagem, porque a imagem embute o
+artefato. O efeito colateral é útil: cada push reexecuta o pipeline de treino inteiro, então
+uma quebra nele aparece no CI e não na hora do deploy.
+
+O scan de segurança roda também por agendamento semanal. Uma imagem que não mudou fica
+insegura sozinha — CVEs novos são publicados contra dependências que já estão lá.
+
+O `cd.yml` só roda por acionamento manual. A decisão desta fase foi preparar o deploy em
+nuvem sem provisionar recursos, então o gatilho automático está desligado de propósito.
+
+### Pipeline de treino
+
+A DAG `triagem_training` encadeia cinco tarefas:
+
+```
+ingestao -> preparo -> treino -> selecao -> publicacao
+```
+
+| Tarefa | Responsabilidade |
+|---|---|
+| `ingestao` | Baixa o corpus público, reaproveitando o que já está em disco |
+| `preparo` | Valida o schema e separa a validação, estratificada |
+| `treino` | Treina os dois candidatos e pontua cada um na validação |
+| `selecao` | Escolhe o campeão e mede o desempenho no conjunto de teste |
+| `publicacao` | Promove o campeão, sujeito ao gate de qualidade |
+
+A DAG é um invólucro fino: cada tarefa delega para uma função de
+`src/triagem/pipeline/steps.py`, testada isoladamente na suíte. O que a DAG declara é a
+topologia — ordem, agendamento, retentativa — não a lógica. Consequência prática: `make
+train` e o Airflow executam **o mesmo código**, então o treino local e o orquestrado não
+podem divergir.
+
+As etapas trocam apenas tipos serializáveis (`str`, `float`, `dict`), porque no Airflow esse
+valor trafega por XCom, onde um `Path` não sobreviveria. Os datasets vão para disco em vez de
+trafegarem entre tarefas: não caberiam em XCom, e materializá-los permite inspecionar o que
+cada etapa produziu quando algo falha.
+
+### Gate de qualidade
+
+A tarefa `publicacao` só promove o modelo se o f1-macro atingir `min_f1_macro = 0,53`.
+
+Esse número não é arbitrário: é o f1-macro de validação do campeão (0,587) menos uma margem
+de 0,05, que absorve a variação natural entre retreinos sem transformar o gate em enfeite
+que sempre passa.
+
+Reprovando, a tarefa falha e **o artefato publicado não é tocado** — o modelo que já está
+atendendo continua no ar. Um retreino ruim não derruba produção. O comportamento é coberto
+por teste (`test_publish_preserva_o_modelo_anterior_ao_reprovar`) e foi verificado na prática
+forçando um piso impossível: a DAG falha na publicação e o `model.joblib` permanece
+inalterado.
+
 ## Como executar
 
 **Pré-requisitos:** Python 3.12, [Poetry](https://python-poetry.org/) 2.x e Docker.
@@ -186,6 +249,28 @@ make api         # http://localhost:8000/docs
 make docker-build   # exige `make train` antes: a imagem embute o modelo
 make docker-run
 ```
+
+### Pipeline de treino no Airflow
+
+```bash
+make airflow-up      # http://localhost:8080 — usuário admin, senha admin
+make airflow-test    # executa a DAG de ponta a ponta (~40s)
+make airflow-down
+```
+
+O Airflow sobe em **um único container** (`LocalExecutor` com SQLite): uma DAG linear de
+cinco tarefas não justifica um container de banco só para a demonstração.
+
+Ele tem compose próprio, separado da stack de observabilidade, e a razão é prática: quem
+quiser ver o dashboard não precisa subir o Airflow, e quem quiser rodar a DAG não precisa
+subir Prometheus e Grafana. Cada `docker compose` sobe só o que a tarefa exige.
+
+O container roda com o UID do host, o que faz os artefatos gravados pela DAG (`models/`,
+`metrics/`, `data/interim/`) pertencerem a quem executou — sem isso, escreveria como um
+usuário interno e ficaria sem permissão nos diretórios montados.
+
+`make airflow-test` usa `exec`, não `run`: o banco de metadados vive dentro do container que
+o `standalone` migrou no startup, então é preciso subir o Airflow antes.
 
 ### Exemplo de requisição
 
@@ -239,8 +324,14 @@ src/triagem/
 ├── api/
 │   ├── main.py                 aplicação FastAPI
 │   └── schemas.py              contratos de entrada e saída
+├── pipeline/
+│   ├── steps.py                etapas do treino, encadeáveis e serializáveis
+│   └── training.py             execução local do pipeline completo
 └── bench/
     └── latency.py              medição de latência com percentis
+
+dags/
+└── triagem_training_dag.py     topologia da DAG de treino no Airflow
 ```
 
 A fronteira que sustenta o projeto é o Protocol `Classifier`: a API depende dele, não de
@@ -250,6 +341,6 @@ comparação entre backends uma medição do sistema real em vez de um script pa
 ## Roadmap
 
 - [x] **Etapa 1** — Modelo, API FastAPI, container e baseline de latência
-- [ ] **Etapa 2** — CI/CD no GitHub Actions e DAG de treino no Airflow
+- [x] **Etapa 2** — CI/CD no GitHub Actions e DAG de treino no Airflow
 - [ ] **Etapa 3** — Métricas Prometheus e dashboard Grafana
 - [ ] **Etapa 4** — Exportação ONNX, quantização e comparativo de latência
