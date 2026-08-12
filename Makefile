@@ -22,8 +22,8 @@ test:             ## Roda a suíte com cobertura
 data:             ## Baixa o corpus público
 	poetry run python -m triagem.data.download
 
-train:            ## Treina e salva o modelo
-	poetry run python -m triagem.model.train
+train:            ## Treina os candidatos, avalia e promove o campeão
+	poetry run python -m triagem.pipeline.training
 
 evaluate:         ## Avalia o modelo e grava metrics/
 	poetry run python -m triagem.model.evaluate
