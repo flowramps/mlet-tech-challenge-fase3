@@ -4,7 +4,7 @@ Classificação de texto clínico servida por API REST, com pipeline de treino o
 observabilidade e otimização de latência.
 
 O sistema recebe o texto livre de um laudo, prevê a categoria da condição clínica e devolve
-a prioridade de atendimento correspondente — em menos de 3 ms de ponta a ponta.
+a prioridade de atendimento correspondente — com mediana de 2,4 ms de ponta a ponta.
 
 ---
 
