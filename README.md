@@ -146,6 +146,10 @@ uma categoria guarda-chuva que se sobrepõe semanticamente às outras quatro —
 inflamação cardíaca pertence legitimamente a duas delas. Esse é o teto do problema, não um
 defeito de ajuste: as classes não são mutuamente exclusivas.
 
+O [model card](docs/model_card.md) consolida uso pretendido, limitações e cenários de falha
+conhecidos do modelo servido — incluindo os que não aparecem nas métricas, como o corpus ser
+em inglês.
+
 **Sobre reprodutibilidade:** as sementes estão fixadas, mas os valores variam na terceira
 casa decimal entre máquinas diferentes — o mesmo commit rendeu f1-macro 0,5812 localmente e
 0,5802 no runner do CI. A causa é o solver `lbfgs`, sensível à ordem de acumulação em ponto
@@ -235,13 +239,18 @@ inalterado.
 
 ### Métricas expostas
 
-A API expõe três métricas em `/metrics`, no formato Prometheus:
+A API expõe seis métricas em `/metrics`, no formato Prometheus. As três primeiras observam
+o **serviço**; as três últimas, o **modelo** — porque HTTP saudável não diz nada sobre
+predição saudável:
 
 | Métrica | Tipo | O que mede |
 |---|---|---|
 | `triagem_http_requests_total` | contador | Requisições por método, rota e status da resposta |
 | `triagem_http_request_duration_seconds` | histograma | Duração HTTP, do recebimento ao envio da resposta |
 | `triagem_inference_duration_seconds` | histograma | Só a inferência do modelo, sem HTTP, por backend |
+| `triagem_predictions_total` | contador | Predições por condição prevista e prioridade atribuída |
+| `triagem_prediction_confidence` | histograma | Distribuição da confiança do modelo no que prevê |
+| `triagem_model_info` | info | Versão e backend do modelo servido |
 
 Throughput e taxa de erro não são métricas próprias: derivam do contador na consulta
 (`rate`), o que elimina a chance de séries redundantes divergirem entre si.
@@ -261,6 +270,11 @@ A métrica de inferência leva para produção a mesma separação do benchmark 
 versus HTTP — rotulada por backend. É ela que permitirá comparar o motor atual com um
 otimizado medindo o sistema real, não um script paralelo.
 
+As métricas de modelo são o alarme de drift: uma classe engolindo a distribuição de
+predições ou uma queda sustentada da confiança aparecem no dashboard enquanto o serviço
+ainda responde 200 em tudo. Os rótulos vêm do conjunto fechado de classes do modelo e da
+tabela de prioridades — nunca da entrada do usuário, pela mesma razão de cardinalidade.
+
 ### Stack local
 
 O `docker-compose.yml` sobe a API, o Prometheus (raspando a cada 5 s) e o Grafana já
@@ -277,10 +291,16 @@ de configuração manual. O JSON do dashboard é versionado em
 | Requisições por segundo | Qual o throughput, rota a rota, agora? |
 | Latência HTTP do `/predict` (p50/p95/p99) | O tempo de resposta está estável? A cauda cresceu? |
 | Inferência do modelo por backend (p95) | Quanto do tempo é modelo — e como os backends se comparam? |
+| Predições por condição | O que o modelo está prevendo? Uma classe engoliu as outras? |
+| Confiança das predições (p50/p90) | O modelo continua tão certo quanto antes? |
 
 ## Como executar
 
 **Pré-requisitos:** Python 3.12, [Poetry](https://python-poetry.org/) 2.x e Docker.
+
+**Configuração:** tudo sai de variáveis de ambiente `TRIAGEM_*`, com padrões que funcionam
+sem nenhum ajuste — nenhum `.env` é necessário. Para divergir dos padrões, copie o
+[`.env.example`](.env.example) para `.env` e edite.
 
 Na primeira execução, nesta ordem:
 
@@ -430,6 +450,9 @@ docker/
 ├── airflow/Dockerfile          imagem do Airflow com as dependências de ML do projeto
 ├── prometheus/prometheus.yml   alvo e intervalo de coleta de métricas
 └── grafana/                    fonte de dados e dashboard provisionados por arquivo
+
+docs/
+└── model_card.md               uso pretendido, limitações e riscos do modelo servido
 ```
 
 A fronteira que sustenta o projeto é o Protocol `Classifier`: a API depende dele, não de
