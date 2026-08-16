@@ -100,9 +100,7 @@ def create_app(classifier: Classifier | None = None) -> FastAPI:
 
         # Saúde do modelo, não do serviço: a distribuição do que ele prevê e com quanta
         # confiança é o que denuncia drift enquanto o HTTP segue respondendo 200.
-        metricas.predictions_total.labels(
-            condition=predicao.condition, priority=prioridade
-        ).inc()
+        metricas.predictions_total.labels(condition=predicao.condition, priority=prioridade).inc()
         metricas.prediction_confidence.observe(predicao.confidence)
 
         return PredictResponse(
