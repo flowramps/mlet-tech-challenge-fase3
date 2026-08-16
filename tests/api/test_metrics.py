@@ -57,6 +57,32 @@ def test_inferencia_e_observada_por_backend(client):
     assert 'triagem_inference_duration_seconds_count{backend="fake"} 1.0' in corpo
 
 
+def test_predicoes_sao_contadas_por_condicao_e_prioridade(client):
+    """Rótulos vêm do conjunto fechado de classes do modelo, nunca da entrada."""
+    client.post("/predict", json={"text": LAUDO})
+    client.post("/predict", json={"text": LAUDO})
+    corpo = client.get("/metrics").text
+    assert (
+        'triagem_predictions_total{condition="nervous system diseases",priority="alta"} 2.0'
+        in corpo
+    )
+
+
+def test_confianca_da_predicao_e_observada(client):
+    client.post("/predict", json={"text": LAUDO})
+    corpo = client.get("/metrics").text
+    assert "triagem_prediction_confidence_count 1.0" in corpo
+    assert "triagem_prediction_confidence_sum 0.91" in corpo
+
+
+def test_metadados_do_modelo_sao_expostos_no_startup(client):
+    """No Grafana dá para saber qual modelo respondia em cada janela de tempo."""
+    corpo = client.get("/metrics").text
+    assert "triagem_model_info" in corpo
+    assert 'version="1.0.0"' in corpo
+    assert 'backend="fake"' in corpo
+
+
 def test_scrape_do_metrics_nao_conta_como_trafego(client):
     """O coletor raspa a cada 5 s: se o scrape contasse, o painel de total de
     requisições subiria sozinho com a API parada."""

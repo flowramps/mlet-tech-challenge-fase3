@@ -8,6 +8,11 @@ divergirem entre si.
 A terceira métrica isola a inferência do modelo, sem HTTP, rotulada por backend. É a
 mesma separação do benchmark local: ela permite atribuir um ganho de latência ao modelo
 ou ao servidor, e comparar backends de inferência em produção.
+
+As demais observam o **modelo**, não o serviço: o que ele prevê e com quanta confiança.
+HTTP saudável não diz nada sobre predição saudável — um modelo pode responder rápido e
+200 enquanto desliza para uma única classe ou perde confiança. São essas séries que
+denunciam drift antes de alguém reclamar da fila de triagem.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from prometheus_client import (
     CollectorRegistry,
     Counter,
     Histogram,
+    Info,
     generate_latest,
 )
 
@@ -35,6 +41,11 @@ HTTP_BUCKETS = (0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.
 # backends não sair achatada no primeiro bucket.
 INFERENCE_BUCKETS = (0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1)
 
+# Com 5 classes, a confiança de um chute uniforme é 0,2 — abaixo disso não existe. A
+# régua começa ali e sobe em passos de 0,05: fino o bastante para um deslocamento da
+# distribuição (drift) aparecer no gráfico antes de virar incidente.
+CONFIDENCE_BUCKETS = tuple(round(0.2 + i * 0.05, 2) for i in range(16))
+
 
 @dataclass(frozen=True)
 class Metrics:
@@ -43,6 +54,9 @@ class Metrics:
     requests_total: Counter
     request_duration: Histogram
     inference_duration: Histogram
+    predictions_total: Counter
+    prediction_confidence: Histogram
+    model_info: Info
 
 
 def instrument(application: FastAPI, registry: CollectorRegistry) -> Metrics:
@@ -72,6 +86,25 @@ def instrument(application: FastAPI, registry: CollectorRegistry) -> Metrics:
             "Duração da inferência do modelo, sem HTTP, por backend.",
             labelnames=("backend",),
             buckets=INFERENCE_BUCKETS,
+            registry=registry,
+        ),
+        # Cardinalidade limitada por construção: os rótulos vêm do conjunto fechado de
+        # classes do modelo e da tabela de prioridades — nunca da entrada do usuário.
+        predictions_total=Counter(
+            "triagem_predictions_total",
+            "Predições servidas, por condição prevista e prioridade atribuída.",
+            labelnames=("condition", "priority"),
+            registry=registry,
+        ),
+        prediction_confidence=Histogram(
+            "triagem_prediction_confidence",
+            "Distribuição da confiança do modelo na condição prevista.",
+            buckets=CONFIDENCE_BUCKETS,
+            registry=registry,
+        ),
+        model_info=Info(
+            "triagem_model",
+            "Metadados do modelo servido.",
             registry=registry,
         ),
     )

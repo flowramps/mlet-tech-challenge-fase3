@@ -45,6 +45,14 @@ def create_app(classifier: Classifier | None = None) -> FastAPI:
         application.state.classifier = (
             classifier if classifier is not None else load_classifier(get_settings())
         )
+        # O mesmo registro do log vai para o /metrics: no Grafana dá para saber qual
+        # modelo respondia em cada janela de tempo sem sair do dashboard.
+        metricas.model_info.info(
+            {
+                "version": application.state.classifier.version,
+                "backend": application.state.classifier.name,
+            }
+        )
         logger.info(
             "modelo carregado: backend=%s versão=%s",
             application.state.classifier.name,
@@ -88,10 +96,19 @@ def create_app(classifier: Classifier | None = None) -> FastAPI:
         # comparar motores de inferência em produção, não só no benchmark local.
         metricas.inference_duration.labels(backend=engine.name).observe(decorrido)
 
+        prioridade = priority_for(predicao.condition)
+
+        # Saúde do modelo, não do serviço: a distribuição do que ele prevê e com quanta
+        # confiança é o que denuncia drift enquanto o HTTP segue respondendo 200.
+        metricas.predictions_total.labels(
+            condition=predicao.condition, priority=prioridade
+        ).inc()
+        metricas.prediction_confidence.observe(predicao.confidence)
+
         return PredictResponse(
             condition=predicao.condition,
             confidence=predicao.confidence,
-            priority=priority_for(predicao.condition),
+            priority=prioridade,
             model_version=engine.version,
             backend=engine.name,
             inference_ms=round(decorrido_ms, 3),
