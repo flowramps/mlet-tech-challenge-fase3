@@ -1,0 +1,40 @@
+# Stack de observabilidade: a API instrumentada, o Prometheus que a raspa e o Grafana já
+# provisionado com fonte de dados e dashboard. Nenhum clique de configuração manual — o
+# que sobe é o que está versionado no repositório.
+#
+# A orquestração de treino (Airflow) tem compose próprio, o docker-compose.airflow.yml:
+# quem quer ver o dashboard não precisa subir o Airflow, e vice-versa.
+name: triagem-observabilidade
+
+services:
+  api:
+    # A imagem embute o modelo, então o build exige `make train` antes.
+    build:
+      context: .
+    image: triagem-api:local
+    ports:
+      - "8000:8000"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    ports:
+      - "3000:3000"
+    environment:
+      # Credenciais fixas de demonstração, como no Airflow. Um ambiente real usaria o
+      # provedor de identidade da organização.
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
