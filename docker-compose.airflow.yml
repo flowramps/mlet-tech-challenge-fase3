@@ -1,0 +1,47 @@
+# Orquestração de treino, separada da stack de observabilidade de propósito: quem quiser
+# ver o dashboard não precisa subir o Airflow, e quem quiser rodar a DAG não precisa subir
+# Prometheus e Grafana. Cada `docker compose` sobe só o que a tarefa exige.
+name: triagem-airflow
+
+services:
+  airflow:
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+    image: triagem-airflow:local
+    command: standalone
+    # Roda com o UID do host (o Makefile injeta AIRFLOW_UID) e grupo 0. Sem isso o
+    # container escreveria como uid 50000 e não teria permissão nos diretórios montados —
+    # a DAG falharia ao gravar as partições. O grupo 0 é o que a imagem oficial deixa com
+    # escrita em /opt/airflow, então o banco de metadados e os logs continuam funcionando.
+    user: "${AIRFLOW_UID:-50000}:0"
+    ports:
+      - "8080:8080"
+    environment:
+      # LocalExecutor com SQLite é suficiente para uma DAG linear de cinco tarefas e
+      # dispensa um container de banco só para a demonstração.
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      # A DAG importa o pacote do projeto montado como volume, em vez de uma cópia
+      # instalada: o código que treina é literalmente o mesmo que a suíte testa.
+      PYTHONPATH: /opt/airflow/src
+      TRIAGEM_DATA_DIR: /opt/airflow/data
+      TRIAGEM_MODELS_DIR: /opt/airflow/models
+      TRIAGEM_METRICS_DIR: /opt/airflow/metrics
+      TRIAGEM_MIN_F1_MACRO: "0.53"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+    volumes:
+      - ./dags:/opt/airflow/dags:ro
+      - ./src:/opt/airflow/src:ro
+      - ./data:/opt/airflow/data
+      - ./models:/opt/airflow/models
+      - ./metrics:/opt/airflow/metrics
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/v2/version"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
