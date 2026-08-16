@@ -7,7 +7,9 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from prometheus_client import CollectorRegistry
 
+from triagem.api.metrics import instrument
 from triagem.api.schemas import HealthResponse, PredictRequest, PredictResponse
 from triagem.config import get_settings
 from triagem.inference.base import Classifier
@@ -60,6 +62,12 @@ def create_app(classifier: Classifier | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Registry próprio por aplicação, em vez do global da biblioteca: a suíte de testes
+    # cria dezenas de apps no mesmo processo, e no registry global a segunda criação
+    # colidiria com a primeira — além de uma vazar contadores para dentro da outra.
+    metricas = instrument(application, CollectorRegistry())
+    application.state.metrics = metricas
+
     @application.get("/health", response_model=HealthResponse, tags=["operação"])
     def health(request: Request) -> HealthResponse:
         """Liveness do serviço e identificação do modelo em uso."""
@@ -73,7 +81,12 @@ def create_app(classifier: Classifier | None = None) -> FastAPI:
 
         inicio = time.perf_counter()
         predicao = engine.predict([payload.text])[0]
-        decorrido_ms = (time.perf_counter() - inicio) * 1_000
+        decorrido = time.perf_counter() - inicio
+        decorrido_ms = decorrido * 1_000
+
+        # A mesma medição vai para o histograma rotulado por backend: é o que permite
+        # comparar motores de inferência em produção, não só no benchmark local.
+        metricas.inference_duration.labels(backend=engine.name).observe(decorrido)
 
         return PredictResponse(
             condition=predicao.condition,

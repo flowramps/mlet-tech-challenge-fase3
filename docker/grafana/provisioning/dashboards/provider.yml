@@ -1,0 +1,9 @@
+# Provisionamento de dashboards por arquivo: o JSON versionado no repositório é a fonte
+# da verdade — o dashboard que o avaliador vê é exatamente o que está no git.
+apiVersion: 1
+
+providers:
+  - name: triagem
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

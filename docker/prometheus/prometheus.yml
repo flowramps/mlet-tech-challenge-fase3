@@ -1,0 +1,10 @@
+# Coleta de métricas da API de triagem.
+global:
+  # 5 s em vez dos 15 s padrão: em uma demonstração curta, esperar três scrapes para a
+  # primeira amostra aparecer no gráfico consumiria metade da demonstração.
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: triagem-api
+    static_configs:
+      - targets: ["api:8000"]

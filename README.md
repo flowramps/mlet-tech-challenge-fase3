@@ -4,7 +4,7 @@ Classificação de texto clínico servida por API REST, com pipeline de treino o
 observabilidade e otimização de latência.
 
 O sistema recebe o texto livre de um laudo, prevê a categoria da condição clínica e devolve
-a prioridade de atendimento correspondente — em menos de 3 ms de ponta a ponta.
+a prioridade de atendimento correspondente — com mediana de 2,4 ms de ponta a ponta.
 
 ---
 
@@ -231,18 +231,84 @@ por teste (`test_publish_preserva_o_modelo_anterior_ao_reprovar`) e foi verifica
 forçando um piso impossível: a DAG falha na publicação e o `model.joblib` permanece
 inalterado.
 
+## Observabilidade
+
+### Métricas expostas
+
+A API expõe três métricas em `/metrics`, no formato Prometheus:
+
+| Métrica | Tipo | O que mede |
+|---|---|---|
+| `triagem_http_requests_total` | contador | Requisições por método, rota e status da resposta |
+| `triagem_http_request_duration_seconds` | histograma | Duração HTTP, do recebimento ao envio da resposta |
+| `triagem_inference_duration_seconds` | histograma | Só a inferência do modelo, sem HTTP, por backend |
+
+Throughput e taxa de erro não são métricas próprias: derivam do contador na consulta
+(`rate`), o que elimina a chance de séries redundantes divergirem entre si.
+
+Três decisões de instrumentação merecem registro:
+
+- **O rótulo de rota é a rota declarada** (`/predict`), nunca o path bruto. Um scanner
+  varrendo URLs aleatórias criaria uma série temporal nova por URL até esgotar a memória
+  do processo — cardinalidade controlada é o que faz a métrica sobreviver exposta à rede.
+- **Os buckets dos histogramas começam em milissegundos.** Os padrão da biblioteca começam
+  em 5 ms; a distribuição inteira desta API (p99 ~3 ms) cairia no primeiro bucket e os
+  percentis sairiam sem resolução.
+- **O scrape do `/metrics` não conta como tráfego.** O Prometheus raspa a cada 5 s: se o
+  scrape contasse, o painel de total de requisições subiria sozinho com a API parada.
+
+A métrica de inferência leva para produção a mesma separação do benchmark local — modelo
+versus HTTP — rotulada por backend. É ela que permitirá comparar o motor atual com um
+otimizado medindo o sistema real, não um script paralelo.
+
+### Stack local
+
+O `docker-compose.yml` sobe a API, o Prometheus (raspando a cada 5 s) e o Grafana já
+provisionado por arquivo: fonte de dados e dashboard entram por volume, sem nenhum clique
+de configuração manual. O JSON do dashboard é versionado em
+`docker/grafana/dashboards/triagem-api.json` — o que o avaliador vê é o que está no git.
+
+### Dashboard
+
+| Painel | Pergunta que responde |
+|---|---|
+| Total de requisições | Quanto tráfego o serviço atendeu? |
+| Taxa de erro (não-2xx) | Que fração das respostas falhou nos últimos 5 minutos? |
+| Requisições por segundo | Qual o throughput, rota a rota, agora? |
+| Latência HTTP do `/predict` (p50/p95/p99) | O tempo de resposta está estável? A cauda cresceu? |
+| Inferência do modelo por backend (p95) | Quanto do tempo é modelo — e como os backends se comparam? |
+
 ## Como executar
 
 **Pré-requisitos:** Python 3.12, [Poetry](https://python-poetry.org/) 2.x e Docker.
+
+Na primeira execução, nesta ordem:
 
 ```bash
 make install     # dependências e hooks de pre-commit
 make data        # baixa o corpus público (~17 MB, idempotente)
 make train       # treina os dois candidatos e promove o campeão
-make evaluate    # avalia no conjunto de teste -> metrics/metrics.json
-make test        # suíte de testes com cobertura
-make bench       # mede a latência de inferência
 ```
+
+Com o modelo treinado, os demais alvos ficam disponíveis:
+
+```bash
+make evaluate    # avalia no conjunto de teste -> metrics/metrics.json
+make bench       # mede a latência de inferência
+make help        # lista todos os alvos
+```
+
+### Testes e lint
+
+```bash
+make test        # suíte completa com cobertura (pytest)
+make lint        # estilo e formatação (ruff)
+```
+
+São os mesmos comandos que a esteira de CI executa a cada push — passar localmente é passar
+na esteira. O `make install` também instala os hooks de pre-commit, que verificam o código
+antes de cada commit. A suíte não depende de `make train`: os testes usam classificadores
+falsos e dados sintéticos, então rodam em segundos e sem rede.
 
 ### API local
 
@@ -279,6 +345,24 @@ usuário interno e ficaria sem permissão nos diretórios montados.
 `make airflow-test` usa `exec`, não `run`: o banco de metadados vive dentro do container que
 o `standalone` migrou no startup, então é preciso subir o Airflow antes.
 
+### Stack de observabilidade
+
+```bash
+make monitoring-up     # API + Prometheus + Grafana (exige `make train` antes)
+make traffic           # ~200 requisições para movimentar os painéis
+make monitoring-down
+```
+
+| Serviço | Endereço |
+|---|---|
+| API | http://localhost:8000/docs |
+| Prometheus | http://localhost:9090 |
+| Grafana | http://localhost:3000 — usuário `admin`, senha `admin` |
+
+O dashboard **Triagem — API de Laudos** já aparece provisionado no Grafana. O `make traffic`
+alterna laudos válidos e, a cada décima requisição, envia um texto curto demais — rejeitado
+com 422 — para o painel de taxa de erro ter o que exibir.
+
 ### Exemplo de requisição
 
 ```bash
@@ -310,6 +394,7 @@ política com a equipe médica e consideraria sinais vitais e histórico, não a
 |---|---|---|
 | `GET` | `/health` | Estado do serviço e identificação do modelo carregado |
 | `POST` | `/predict` | Classifica um laudo e devolve a prioridade |
+| `GET` | `/metrics` | Métricas no formato Prometheus |
 | `GET` | `/docs` | Documentação interativa (Swagger) |
 
 ## Estrutura do projeto
@@ -330,6 +415,7 @@ src/triagem/
 │   └── priority.py             regra de negócio condição -> prioridade
 ├── api/
 │   ├── main.py                 aplicação FastAPI
+│   ├── metrics.py              instrumentação Prometheus
 │   └── schemas.py              contratos de entrada e saída
 ├── pipeline/
 │   ├── steps.py                etapas do treino, encadeáveis e serializáveis
@@ -339,6 +425,11 @@ src/triagem/
 
 dags/
 └── triagem_training_dag.py     topologia da DAG de treino no Airflow
+
+docker/
+├── airflow/Dockerfile          imagem do Airflow com as dependências de ML do projeto
+├── prometheus/prometheus.yml   alvo e intervalo de coleta de métricas
+└── grafana/                    fonte de dados e dashboard provisionados por arquivo
 ```
 
 A fronteira que sustenta o projeto é o Protocol `Classifier`: a API depende dele, não de
@@ -349,5 +440,5 @@ comparação entre backends uma medição do sistema real em vez de um script pa
 
 - [x] **Etapa 1** — Modelo, API FastAPI, container e baseline de latência
 - [x] **Etapa 2** — CI/CD no GitHub Actions e DAG de treino no Airflow
-- [ ] **Etapa 3** — Métricas Prometheus e dashboard Grafana
+- [x] **Etapa 3** — Métricas Prometheus e dashboard Grafana
 - [ ] **Etapa 4** — Exportação ONNX, quantização e comparativo de latência

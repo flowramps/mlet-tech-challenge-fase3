@@ -1,4 +1,5 @@
-.PHONY: help install lint format test data train evaluate bench api docker-build docker-run clean
+.PHONY: help install lint format test data train evaluate bench api docker-build docker-run \
+	airflow-up airflow-down airflow-test monitoring-up monitoring-down traffic clean
 
 help:             ## Lista os alvos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -56,6 +57,33 @@ airflow-down:     ## Derruba o Airflow
 airflow-test:     ## Executa a DAG de treino de ponta a ponta (exige airflow-up antes)
 	docker compose -f docker-compose.airflow.yml exec -T airflow \
 		airflow dags test triagem_training
+
+monitoring-up:    ## Sobe API + Prometheus + Grafana (exige `make train` antes)
+	docker compose up -d --build
+
+monitoring-down:  ## Derruba a stack de observabilidade
+	docker compose down
+
+# Tráfego de demonstração: laudos válidos alternados e, a cada décima requisição, um
+# texto curto demais — rejeitado com 422 — para o painel de taxa de erro ter o que exibir.
+traffic:          ## Gera ~200 requisições contra a API para movimentar o dashboard
+	@echo "gerando tráfego contra localhost:8000 (~30 s)..."
+	@for i in $$(seq 1 200); do \
+		if [ $$((i % 10)) -eq 0 ]; then \
+			curl -s -o /dev/null -X POST localhost:8000/predict \
+				-H 'Content-Type: application/json' -d '{"text":"curto"}'; \
+		elif [ $$((i % 2)) -eq 0 ]; then \
+			curl -s -o /dev/null -X POST localhost:8000/predict \
+				-H 'Content-Type: application/json' \
+				-d '{"text":"Coronary artery bypass grafting in patients with severe left ventricular dysfunction undergoing myocardial revascularization."}'; \
+		else \
+			curl -s -o /dev/null -X POST localhost:8000/predict \
+				-H 'Content-Type: application/json' \
+				-d '{"text":"Endoscopic evaluation of persistent epigastric pain with suspected peptic ulcer disease and gastrointestinal bleeding."}'; \
+		fi; \
+		sleep 0.1; \
+	done
+	@echo "pronto — o dashboard deve refletir o tráfego em alguns segundos."
 
 clean:            ## Remove caches locais
 	rm -rf .pytest_cache .ruff_cache .coverage htmlcov
