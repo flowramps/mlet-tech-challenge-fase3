@@ -19,6 +19,7 @@ import pendulum
 from airflow.sdk import dag, task
 
 from triagem.pipeline.steps import (
+    ModelNotPromoted,
     evaluate_incumbent,
     ingest,
     prepare,
@@ -96,17 +97,31 @@ def triagem_training():
 
     @task
     def publicacao(resumo: dict[str, object], incumbente: dict[str, float] | None) -> str:
-        """Promove o campeão — ou falha o run se ele regredir no piso, no incumbente, ou na
-        métrica de negócio (recall de prioridade alta) — e registra o resultado no histórico
-        de treinos (``metrics/training_history.jsonl``)."""
-        return promote(
-            resumo,
-            incumbente,
-            MODELS_DIR / "model.joblib",
-            METRICS_DIR,
-            min_f1_macro=MIN_F1_MACRO,
-            min_priority_recall_alta=MIN_PRIORITY_RECALL_ALTA,
-        )
+        """Promove o campeão e registra o run em ``metrics/training_history.jsonl``.
+
+        Os dois desfechos negativos são deliberadamente distintos na interface do Airflow:
+
+        - **falha** (``QualityGateError``) se o candidato violar um piso absoluto — o modelo
+          é inutilizável e alguém precisa investigar;
+        - **skip** (``AirflowSkipException``) se ele apenas não superar o incumbente — o
+          resultado esperado de todo retreino sobre um corpus que não mudou.
+
+        Sem essa distinção o retreino semanal marcaria o run como falho toda semana, e um
+        alarme que dispara sempre não é um alarme.
+        """
+        from airflow.exceptions import AirflowSkipException
+
+        try:
+            return promote(
+                resumo,
+                incumbente,
+                MODELS_DIR / "model.joblib",
+                METRICS_DIR,
+                min_f1_macro=MIN_F1_MACRO,
+                min_priority_recall_alta=MIN_PRIORITY_RECALL_ALTA,
+            )
+        except ModelNotPromoted as motivo:
+            raise AirflowSkipException(str(motivo)) from motivo
 
     corpus = ingestao()
     particoes = preparo(corpus)

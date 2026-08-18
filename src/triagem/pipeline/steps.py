@@ -39,7 +39,25 @@ logger = logging.getLogger(__name__)
 
 
 class QualityGateError(RuntimeError):
-    """Modelo recém-treinado reprovado no piso de qualidade."""
+    """Modelo recém-treinado reprovado num piso absoluto de qualidade.
+
+    Sinaliza que algo está errado com o treino: o candidato não é utilizável. O run do
+    pipeline deve **falhar** — alguém precisa investigar.
+    """
+
+
+# O sufixo `Error` que a N818 pede é justamente o que esta classe não pode ter: ela sinaliza
+# um desfecho normal do pipeline, e o nome é metade da distinção que o resto do módulo faz
+# questão de manter. Regra dispensada aqui de propósito, não por descuido.
+class ModelNotPromoted(RuntimeError):  # noqa: N818
+    """Candidato utilizável, porém não melhor que o modelo já em produção.
+
+    Deliberadamente **não** é subclasse de :class:`QualityGateError`: é um desfecho normal
+    do pipeline, não um defeito. Sobre um corpus estático o retreino reproduz o incumbente,
+    então esta é a saída esperada de toda execução periódica depois da primeira — tratá-la
+    como falha deixaria a DAG semanal vermelha para sempre e faria o alarme perder o sentido.
+    A orquestração converte isto em ``skip``.
+    """
 
 
 def ingest(data_dir: Path | str, *, force: bool = False) -> dict[str, str]:
@@ -186,6 +204,52 @@ def evaluate_incumbent(model_path: Path | str, test_csv: str) -> dict[str, float
     return {"f1_macro": float(metricas["f1_macro"]), "priority_recall_alta": float(recall_alta)}
 
 
+def _floor_failures(
+    candidate_f1_macro: float,
+    candidate_priority_recall_alta: float,
+    *,
+    min_f1_macro: float,
+    min_priority_recall_alta: float,
+) -> list[str]:
+    """Pisos absolutos violados — cada um significa candidato inutilizável."""
+    motivos: list[str] = []
+    if candidate_f1_macro < min_f1_macro:
+        motivos.append(f"f1_macro {candidate_f1_macro:.4f} abaixo do mínimo {min_f1_macro:.4f}")
+    if candidate_priority_recall_alta < min_priority_recall_alta:
+        motivos.append(
+            f"recall de prioridade alta {candidate_priority_recall_alta:.4f} abaixo do "
+            f"mínimo {min_priority_recall_alta:.4f}"
+        )
+    return motivos
+
+
+def _regression_failures(
+    candidate_f1_macro: float,
+    candidate_priority_recall_alta: float,
+    baseline_f1_macro: float | None,
+    baseline_priority_recall_alta: float | None,
+) -> list[str]:
+    """Critérios de não regressão contra o incumbente — candidato bom, só não melhor.
+
+    Vazia quando não há incumbente: no primeiro treino só os pisos absolutos se aplicam.
+    """
+    if baseline_f1_macro is None or baseline_priority_recall_alta is None:
+        return []
+
+    motivos: list[str] = []
+    if candidate_f1_macro <= baseline_f1_macro:
+        motivos.append(
+            f"f1_macro {candidate_f1_macro:.4f} não supera o modelo em produção "
+            f"({baseline_f1_macro:.4f})"
+        )
+    if candidate_priority_recall_alta < baseline_priority_recall_alta:
+        motivos.append(
+            f"recall de prioridade alta {candidate_priority_recall_alta:.4f} regride em "
+            f"relação ao modelo em produção ({baseline_priority_recall_alta:.4f})"
+        )
+    return motivos
+
+
 def _gate_failures(
     candidate_f1_macro: float,
     candidate_priority_recall_alta: float,
@@ -195,27 +259,23 @@ def _gate_failures(
     min_f1_macro: float,
     min_priority_recall_alta: float,
 ) -> list[str]:
-    """Lista os critérios do gate de promoção que o candidato não cumpre — vazia se passou."""
-    motivos: list[str] = []
-    if candidate_f1_macro < min_f1_macro:
-        motivos.append(f"f1_macro {candidate_f1_macro:.4f} abaixo do mínimo {min_f1_macro:.4f}")
-    if candidate_priority_recall_alta < min_priority_recall_alta:
-        motivos.append(
-            f"recall de prioridade alta {candidate_priority_recall_alta:.4f} abaixo do "
-            f"mínimo {min_priority_recall_alta:.4f}"
-        )
-    if baseline_f1_macro is not None and baseline_priority_recall_alta is not None:
-        if candidate_f1_macro <= baseline_f1_macro:
-            motivos.append(
-                f"f1_macro {candidate_f1_macro:.4f} não supera o modelo em produção "
-                f"({baseline_f1_macro:.4f})"
-            )
-        if candidate_priority_recall_alta < baseline_priority_recall_alta:
-            motivos.append(
-                f"recall de prioridade alta {candidate_priority_recall_alta:.4f} regride em "
-                f"relação ao modelo em produção ({baseline_priority_recall_alta:.4f})"
-            )
-    return motivos
+    """Todos os critérios do gate que o candidato não cumpre — vazia se ele deve ser promovido.
+
+    Não distingue a severidade dos motivos; para isso existem :func:`_floor_failures` e
+    :func:`_regression_failures`. Serve a quem só precisa da decisão final: o predicado
+    :func:`should_promote` e o registro no histórico.
+    """
+    return _floor_failures(
+        candidate_f1_macro,
+        candidate_priority_recall_alta,
+        min_f1_macro=min_f1_macro,
+        min_priority_recall_alta=min_priority_recall_alta,
+    ) + _regression_failures(
+        candidate_f1_macro,
+        candidate_priority_recall_alta,
+        baseline_f1_macro,
+        baseline_priority_recall_alta,
+    )
 
 
 def should_promote(
@@ -259,20 +319,32 @@ def publish(
 ) -> str:
     """Promove o campeão a modelo servido, se ele passar no gate.
 
-    Reprovando, levanta :class:`QualityGateError` **sem tocar no artefato publicado**: um
-    retreino ruim não pode derrubar o modelo que já está atendendo em produção.
+    Em qualquer desfecho negativo o artefato publicado **não é tocado**: um retreino ruim não
+    derruba o modelo que já está atendendo. O que muda é a severidade sinalizada:
+
+    - :class:`QualityGateError` se um piso absoluto foi violado — o candidato é inutilizável
+      e o run deve falhar.
+    - :class:`ModelNotPromoted` se ele só não superou o incumbente — desfecho normal.
+
+    O piso tem precedência: um candidato que viola os dois é um defeito, não um empate.
     """
-    motivos = _gate_failures(
+    pisos = _floor_failures(
         f1_macro,
         priority_recall_alta,
-        baseline_f1_macro,
-        baseline_priority_recall_alta,
         min_f1_macro=min_f1_macro,
         min_priority_recall_alta=min_priority_recall_alta,
     )
-    if motivos:
+    if pisos:
         raise QualityGateError(
-            "; ".join(motivos) + " — modelo não promovido, o anterior segue em uso"
+            "; ".join(pisos) + " — modelo não promovido, o anterior segue em uso"
+        )
+
+    regressoes = _regression_failures(
+        f1_macro, priority_recall_alta, baseline_f1_macro, baseline_priority_recall_alta
+    )
+    if regressoes:
+        raise ModelNotPromoted(
+            "; ".join(regressoes) + " — modelo não promovido, o anterior segue em uso"
         )
 
     destino = Path(model_path)

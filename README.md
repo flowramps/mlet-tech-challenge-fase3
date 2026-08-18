@@ -255,14 +255,27 @@ absolutos e dois de não regressão contra o incumbente (`_gate_failures`/`shoul
 Critérios 3 e 4 só se aplicam quando já existe um modelo publicado; sem incumbente (primeiro
 treino), só os pisos absolutos (1 e 2) valem.
 
-Reprovando em qualquer um dos quatro, a tarefa falha e **o artefato publicado não é tocado** —
-o modelo que já está atendendo continua no ar. Um retreino ruim, ou simplesmente não melhor —
-tecnicamente ou na métrica de negócio —, não derruba produção. O comportamento é coberto por
-teste (`test_publish_preserva_o_modelo_anterior_ao_reprovar`,
-`test_publish_falha_quando_nao_supera_o_incumbente`,
-`test_publish_falha_quando_recall_de_prioridade_alta_regride`) e foi verificado na prática: um
-segundo `make train` sobre o mesmo dado e seed treina um candidato idêntico ao incumbente e é
-corretamente recusado (`f1_macro 0.5802 não supera o modelo em produção (0.5802)`).
+Em qualquer desfecho negativo **o artefato publicado não é tocado** — o modelo que já está
+atendendo continua no ar. O que muda é a gravidade do sinal, e a distinção é o ponto:
+
+| Desfecho | O que significa | Exceção | Airflow |
+|---|---|---|---|
+| Violou um piso (1 ou 2) | Candidato inutilizável, algo quebrou no treino | `QualityGateError` | run **falha** |
+| Só não superou o incumbente (3 ou 4) | Candidato bom, apenas não melhor | `ModelNotPromoted` | tarefa **skip** |
+
+Tratar os dois casos como falha seria cômodo e errado. O corpus é estático e as sementes são
+fixas, então **todo retreino reproduz o incumbente**: um segundo `make train` treina um
+candidato idêntico ao que está publicado (`f1_macro 0.5812 não supera o modelo em produção
+(0.5812)`). Se isso derrubasse o run, a DAG semanal ficaria vermelha para sempre e o alarme
+deixaria de significar alguma coisa — o operador aprenderia a ignorá-lo, que é justamente
+como incidentes reais passam despercebidos. Por isso `ModelNotPromoted` não é subclasse de
+`QualityGateError`: um `except QualityGateError` engoliria as duas.
+
+Coberto por teste em `tests/pipeline/`:
+`test_publish_prioriza_o_piso_absoluto_sobre_a_nao_promocao` (piso tem precedência),
+`test_nao_promocao_nao_e_confundida_com_reprovacao_de_qualidade` (os tipos são distintos) e
+`test_run_pipeline_nao_promove_retreino_identico_mas_conclui_sem_erro` (o pipeline local roda
+duas vezes seguidas e conclui, sem promover na segunda).
 
 ### Histórico de execuções
 

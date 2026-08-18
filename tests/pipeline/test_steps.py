@@ -6,6 +6,7 @@ import pytest
 
 from triagem.data.prepare import LABEL_COLUMN, TEXT_COLUMN
 from triagem.pipeline.steps import (
+    ModelNotPromoted,
     QualityGateError,
     evaluate_incumbent,
     ingest,
@@ -203,15 +204,20 @@ def test_publish_falha_quando_recall_de_prioridade_alta_fica_abaixo_do_piso(tmp_
     assert not destino.exists()
 
 
-def test_publish_falha_quando_nao_supera_o_incumbente(tmp_path: Path):
-    """Acima do piso não basta: um retreino pior que a produção não pode promover."""
+def test_publish_sinaliza_nao_promocao_quando_nao_supera_o_incumbente(tmp_path: Path):
+    """Não superar a produção é 'nada a promover', não 'pipeline quebrado'.
+
+    O candidato passou nos dois pisos absolutos — ele é um modelo utilizável, só não é
+    melhor que o que já está no ar. Sinalizar isso como falha faria a DAG semanal sobre um
+    corpus estático ficar vermelha para sempre, já que o retreino reproduz o incumbente.
+    """
     destino = tmp_path / "model.joblib"
     destino.write_bytes(b"modelo bom em producao")
 
     candidato = tmp_path / "candidato.joblib"
     candidato.write_bytes(b"modelo um pouco pior")
 
-    with pytest.raises(QualityGateError, match="produção"):
+    with pytest.raises(ModelNotPromoted, match="produção"):
         publish(
             str(candidato),
             destino,
@@ -225,7 +231,7 @@ def test_publish_falha_quando_nao_supera_o_incumbente(tmp_path: Path):
     assert destino.read_bytes() == b"modelo bom em producao"
 
 
-def test_publish_falha_quando_recall_de_prioridade_alta_regride(tmp_path: Path):
+def test_publish_sinaliza_nao_promocao_quando_recall_de_prioridade_alta_regride(tmp_path: Path):
     """f1-macro melhor não salva um candidato que piora a segurança da fila de triagem."""
     destino = tmp_path / "model.joblib"
     destino.write_bytes(b"modelo bom em producao")
@@ -233,12 +239,48 @@ def test_publish_falha_quando_recall_de_prioridade_alta_regride(tmp_path: Path):
     candidato = tmp_path / "candidato.joblib"
     candidato.write_bytes(b"modelo com f1 melhor mas recall de alta pior")
 
-    with pytest.raises(QualityGateError, match="prioridade alta"):
+    with pytest.raises(ModelNotPromoted, match="prioridade alta"):
         publish(
             str(candidato),
             destino,
             f1_macro=0.65,
             priority_recall_alta=0.70,
+            baseline_f1_macro=0.60,
+            baseline_priority_recall_alta=0.80,
+            **GATE_PADRAO,
+        )
+
+    assert destino.read_bytes() == b"modelo bom em producao"
+
+
+def test_nao_promocao_nao_e_confundida_com_reprovacao_de_qualidade(tmp_path: Path):
+    """As duas condições precisam ser distinguíveis por tipo, não só pela mensagem.
+
+    A DAG converte uma em `skip` e deixa a outra falhar o run — se `ModelNotPromoted` fosse
+    subclasse de `QualityGateError`, um `except QualityGateError` engoliria as duas.
+    """
+    assert not issubclass(ModelNotPromoted, QualityGateError)
+    assert not issubclass(QualityGateError, ModelNotPromoted)
+
+
+def test_publish_prioriza_o_piso_absoluto_sobre_a_nao_promocao(tmp_path: Path):
+    """Candidato ruim E pior que a produção é falha de qualidade, não mero 'não promover'.
+
+    A condição mais severa manda: um modelo abaixo do piso indica que algo quebrou no treino
+    e alguém precisa olhar, então o run tem que falhar de verdade.
+    """
+    destino = tmp_path / "model.joblib"
+    destino.write_bytes(b"modelo bom em producao")
+
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"modelo quebrado")
+
+    with pytest.raises(QualityGateError):
+        publish(
+            str(candidato),
+            destino,
+            f1_macro=0.10,
+            priority_recall_alta=0.10,
             baseline_f1_macro=0.60,
             baseline_priority_recall_alta=0.80,
             **GATE_PADRAO,
@@ -317,6 +359,33 @@ def test_promote_registra_reprovacao_e_ainda_levanta(tmp_path: Path):
     assert entrada["promoted"] is False
     assert entrada["rejection_reasons"]
     assert not destino.exists()
+
+
+def test_promote_registra_no_historico_quando_apenas_nao_promove(tmp_path: Path):
+    """Um run que não promove por empate ainda precisa deixar rastro, com o motivo."""
+    destino = tmp_path / "model.joblib"
+    destino.write_bytes(b"modelo em producao")
+
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"candidato identico ao incumbente")
+
+    incumbente = {"f1_macro": 0.60, "priority_recall_alta": 0.80}
+
+    with pytest.raises(ModelNotPromoted):
+        promote(
+            _resumo(0.60, 0.80, candidato),
+            incumbente,
+            destino,
+            tmp_path / "metricas",
+            **GATE_PADRAO,
+        )
+
+    entrada = json.loads(
+        (tmp_path / "metricas" / "training_history.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert entrada["promoted"] is False
+    assert entrada["rejection_reasons"]
+    assert destino.read_bytes() == b"modelo em producao"
 
 
 def test_promote_acumula_execucoes_sem_sobrescrever(tmp_path: Path):
