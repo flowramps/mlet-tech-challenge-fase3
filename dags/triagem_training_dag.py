@@ -5,7 +5,8 @@ A DAG é deliberadamente fina: cada tarefa delega para uma função de
 declara aqui é a topologia — ordem, agendamento e política de retentativa — não a lógica.
 
 Encadeamento: ingestão -> preparo -> treino dos candidatos -> seleção e avaliação ->
-publicação com gate de qualidade.
+publicação com gate de qualidade. A avaliação do incumbente (modelo hoje em produção) roda
+em paralelo, pois só depende da ingestão, não do treino dos candidatos.
 """
 
 from __future__ import annotations

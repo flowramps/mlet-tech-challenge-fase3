@@ -197,10 +197,14 @@ nuvem sem provisionar recursos, então o gatilho automático está desligado de 
 
 ### Pipeline de treino
 
-A DAG `triagem_training` encadeia cinco tarefas:
+A DAG `triagem_training` encadeia seis tarefas. `avaliar_incumbente` só depende do corpus, não
+do treino dos candidatos, então roda em paralelo com `preparo`/`treino`/`selecao` em vez de
+esperá-los:
 
 ```
-ingestao -> preparo -> treino -> selecao -> publicacao
+ingestao --+--> preparo --> treino --> selecao --+
+           |                                      |
+           +--> avaliar_incumbente ---------------+--> publicacao
 ```
 
 | Tarefa | Responsabilidade |
@@ -208,8 +212,9 @@ ingestao -> preparo -> treino -> selecao -> publicacao
 | `ingestao` | Baixa o corpus público, reaproveitando o que já está em disco |
 | `preparo` | Valida o schema e separa a validação, estratificada |
 | `treino` | Treina os dois candidatos e pontua cada um na validação |
-| `selecao` | Escolhe o campeão e mede o desempenho no conjunto de teste |
-| `publicacao` | Promove o campeão, sujeito ao gate de qualidade |
+| `selecao` | Escolhe o campeão e mede o desempenho (f1-macro, recall de prioridade alta) no teste |
+| `avaliar_incumbente` | Mede o mesmo desempenho do modelo *hoje em produção*, do zero, no mesmo teste |
+| `publicacao` | Decide a promoção pelo gate de 4 critérios e registra o resultado no histórico |
 
 A DAG é um invólucro fino: cada tarefa delega para uma função de
 `src/triagem/pipeline/steps.py`, testada isoladamente na suíte. O que a DAG declara é a
@@ -384,8 +389,8 @@ make airflow-test    # executa a DAG de ponta a ponta (~40s)
 make airflow-down
 ```
 
-O Airflow sobe em **um único container** (`LocalExecutor` com SQLite): uma DAG linear de
-cinco tarefas não justifica um container de banco só para a demonstração.
+O Airflow sobe em **um único container** (`LocalExecutor` com SQLite): uma DAG de seis
+tarefas não justifica um container de banco só para a demonstração.
 
 Ele tem compose próprio, separado da stack de observabilidade, e a razão é prática: quem
 quiser ver o dashboard não precisa subir o Airflow, e quem quiser rodar a DAG não precisa

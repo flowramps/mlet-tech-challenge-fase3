@@ -18,8 +18,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # LocalExecutor com SQLite é suficiente para uma DAG linear de cinco tarefas e
-      # dispensa um container de banco só para a demonstração.
+      # LocalExecutor com SQLite é suficiente para uma DAG de seis tarefas (uma delas
+      # em paralelo) e dispensa um container de banco só para a demonstração.
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
@@ -31,6 +31,7 @@ services:
       TRIAGEM_MODELS_DIR: /opt/airflow/models
       TRIAGEM_METRICS_DIR: /opt/airflow/metrics
       TRIAGEM_MIN_F1_MACRO: "0.53"
+      TRIAGEM_MIN_PRIORITY_RECALL_ALTA: "0.72"
       _AIRFLOW_WWW_USER_USERNAME: admin
       _AIRFLOW_WWW_USER_PASSWORD: admin
     volumes:
