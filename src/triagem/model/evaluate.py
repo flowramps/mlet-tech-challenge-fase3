@@ -20,6 +20,8 @@ from sklearn.metrics import (
 )
 from sklearn.pipeline import Pipeline
 
+from triagem.inference.priority import priority_for
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,6 +50,31 @@ def evaluate_model(
     }
 
 
+def priority_recall(
+    labels: Sequence[int],
+    predictions: Sequence[int],
+    labels_by_id: dict[int, str],
+    *,
+    priority: str,
+) -> float:
+    """Recall de uma prioridade: fração dos casos REALMENTE dessa prioridade cuja condição
+    prevista também mapeia para ela — a métrica de negócio da triagem.
+
+    Rebaixar um caso real de prioridade alta pesa mais do que confundir duas condições que já
+    dariam na mesma prioridade (ex. `cardiovascular diseases` com `nervous system diseases`,
+    ambas "alta"). f1-macro por condição não captura essa assimetria; esta métrica, sim.
+    """
+    reais = [priority_for(labels_by_id[int(rotulo)]) for rotulo in labels]
+    previstas = [priority_for(labels_by_id[int(rotulo)]) for rotulo in predictions]
+
+    positivos = [indice for indice, p in enumerate(reais) if p == priority]
+    if not positivos:
+        raise ValueError(f"nenhum caso real de prioridade {priority!r} no conjunto avaliado")
+
+    acertos = sum(1 for indice in positivos if previstas[indice] == priority)
+    return acertos / len(positivos)
+
+
 def save_metrics(metrics: dict[str, Any], destination: Path) -> Path:
     """Grava as métricas como JSON legível."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -71,12 +98,21 @@ def main() -> None:
     metricas = evaluate_model(
         bundle["pipeline"], teste[TEXT_COLUMN], teste[LABEL_COLUMN], CONDITION_NAMES
     )
-    save_metrics(metricas, settings.metrics_dir / "metrics.json")
+    recall_alta = priority_recall(
+        teste[LABEL_COLUMN],
+        bundle["pipeline"].predict(teste[TEXT_COLUMN]),
+        CONDITION_NAMES,
+        priority="alta",
+    )
+    save_metrics(
+        {**metricas, "priority_recall_alta": recall_alta}, settings.metrics_dir / "metrics.json"
+    )
 
     logger.info(
-        "accuracy=%.4f f1_macro=%.4f (n=%d)",
+        "accuracy=%.4f f1_macro=%.4f priority_recall_alta=%.4f (n=%d)",
         metricas["accuracy"],
         metricas["f1_macro"],
+        recall_alta,
         metricas["support"],
     )
 

@@ -223,17 +223,49 @@ cada etapa produziu quando algo falha.
 
 ### Gate de qualidade
 
-A tarefa `publicacao` só promove o modelo se o f1-macro atingir `min_f1_macro = 0,53`.
+A tarefa `publicacao` promove o candidato só se ele passar em quatro critérios — dois pisos
+absolutos e dois de não regressão contra o incumbente (`_gate_failures`/`should_promote` em
+`src/triagem/pipeline/steps.py`):
 
-Esse número não é arbitrário: é o f1-macro de validação do campeão (0,587) menos uma margem
-de 0,05, que absorve a variação natural entre retreinos sem transformar o gate em enfeite
-que sempre passa.
+1. **Piso de f1-macro:** f1-macro (teste) ≥ `min_f1_macro = 0,53`. Esse número não é
+   arbitrário: é o f1-macro de validação do campeão (0,587) menos uma margem de 0,05, que
+   absorve a variação natural entre retreinos sem transformar o gate em enfeite que sempre
+   passa.
+2. **Piso de recall na prioridade "alta"** (`min_priority_recall_alta = 0,72`) — a **métrica
+   de negócio** da triagem, não só a técnica. `cardiovascular diseases` e
+   `nervous system diseases` mapeiam para prioridade "alta"
+   (`src/triagem/inference/priority.py`); o recall dessa prioridade mede a fração de casos
+   *realmente* urgentes que o modelo não rebaixa para a fila de menor prioridade. Rebaixar um
+   caso urgente pesa mais do que confundir duas condições que já dariam na mesma prioridade —
+   f1-macro sozinho não enxerga essa assimetria. Calibrado a partir do recall do campeão no
+   teste (0,7739) com a mesma margem de 0,05 do piso de f1-macro.
+3. **Superar o incumbente em f1-macro:** o candidato precisa bater, estritamente, o f1-macro
+   do modelo *hoje em produção* — reavaliado do zero no mesmo conjunto de teste pela tarefa
+   `avaliar_incumbente`, não lido de um arquivo de métricas que o próprio run sobrescreve.
+4. **Não regredir no recall de prioridade alta:** o candidato pode empatar, mas não pode ficar
+   abaixo do recall de prioridade alta do incumbente — um f1-macro melhor não compensa piorar
+   a segurança da fila de triagem.
 
-Reprovando, a tarefa falha e **o artefato publicado não é tocado** — o modelo que já está
-atendendo continua no ar. Um retreino ruim não derruba produção. O comportamento é coberto
-por teste (`test_publish_preserva_o_modelo_anterior_ao_reprovar`) e foi verificado na prática
-forçando um piso impossível: a DAG falha na publicação e o `model.joblib` permanece
-inalterado.
+Critérios 3 e 4 só se aplicam quando já existe um modelo publicado; sem incumbente (primeiro
+treino), só os pisos absolutos (1 e 2) valem.
+
+Reprovando em qualquer um dos quatro, a tarefa falha e **o artefato publicado não é tocado** —
+o modelo que já está atendendo continua no ar. Um retreino ruim, ou simplesmente não melhor —
+tecnicamente ou na métrica de negócio —, não derruba produção. O comportamento é coberto por
+teste (`test_publish_preserva_o_modelo_anterior_ao_reprovar`,
+`test_publish_falha_quando_nao_supera_o_incumbente`,
+`test_publish_falha_quando_recall_de_prioridade_alta_regride`) e foi verificado na prática: um
+segundo `make train` sobre o mesmo dado e seed treina um candidato idêntico ao incumbente e é
+corretamente recusado (`f1_macro 0.5802 não supera o modelo em produção (0.5802)`).
+
+### Histórico de execuções
+
+Cada chamada à tarefa `publicacao` (via `promote()`) acrescenta uma linha a
+`metrics/training_history.jsonl` — promovido ou não, com os quatro números do gate e, se
+reprovado, o motivo. Um arquivo por linha (JSON Lines), nunca reescrito: dá para comparar
+retreinos ao longo do tempo, e nenhum run reprovado fica sem rastro. `metrics/metrics.json` e
+`metrics/model_selection.json`, em contraste, guardam só o *último* run — o histórico existe
+justamente para o que esses dois arquivos não cobrem.
 
 ## Observabilidade
 

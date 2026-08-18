@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -6,11 +7,13 @@ import pytest
 from triagem.data.prepare import LABEL_COLUMN, TEXT_COLUMN
 from triagem.pipeline.steps import (
     QualityGateError,
+    evaluate_incumbent,
     ingest,
     prepare,
+    promote,
     publish,
     select_and_evaluate,
-    should_publish,
+    should_promote,
     train_candidates,
 )
 
@@ -91,15 +94,55 @@ def test_select_and_evaluate_resume_o_campeao(corpus_csv: Path, tmp_path: Path):
 
     assert resumo["champion"] in scores
     assert 0.0 <= resumo["f1_macro"] <= 1.0
+    assert 0.0 <= resumo["priority_recall_alta"] <= 1.0
     assert Path(resumo["candidate_path"]).exists()
     assert (tmp_path / "metricas" / "metrics.json").exists()
     assert (tmp_path / "metricas" / "model_selection.json").exists()
 
 
-def test_should_publish_compara_com_o_piso():
-    assert should_publish(0.60, 0.53) is True
-    assert should_publish(0.53, 0.53) is True
-    assert should_publish(0.52, 0.53) is False
+GATE_PADRAO = {"min_f1_macro": 0.53, "min_priority_recall_alta": 0.5}
+
+
+def test_should_promote_compara_com_o_piso_sem_incumbente():
+    assert should_promote(0.60, 0.80, None, None, **GATE_PADRAO) is True
+    assert should_promote(0.53, 0.80, None, None, **GATE_PADRAO) is True
+    assert should_promote(0.52, 0.80, None, None, **GATE_PADRAO) is False
+
+
+def test_should_promote_exige_piso_de_recall_de_prioridade_alta():
+    # acima do piso de f1-macro, mas abaixo do piso da métrica de negócio: não promove
+    assert should_promote(0.60, 0.49, None, None, **GATE_PADRAO) is False
+    assert should_promote(0.60, 0.50, None, None, **GATE_PADRAO) is True
+
+
+def test_should_promote_exige_superar_o_incumbente():
+    # acima dos dois pisos, mas não supera o f1-macro do modelo em produção: não promove
+    assert should_promote(0.55, 0.80, 0.60, 0.80, **GATE_PADRAO) is False
+    assert should_promote(0.60, 0.80, 0.60, 0.80, **GATE_PADRAO) is False
+    assert should_promote(0.61, 0.80, 0.60, 0.80, **GATE_PADRAO) is True
+
+
+def test_should_promote_nao_permite_regredir_o_recall_de_prioridade_alta():
+    """f1-macro melhor não basta: a métrica de negócio não pode piorar em relação à produção."""
+    assert should_promote(0.65, 0.70, 0.60, 0.80, **GATE_PADRAO) is False
+    # empatar no recall de prioridade alta é aceitável — só não pode piorar
+    assert should_promote(0.65, 0.80, 0.60, 0.80, **GATE_PADRAO) is True
+
+
+def test_evaluate_incumbent_sem_modelo_publicado(tmp_path: Path):
+    assert evaluate_incumbent(tmp_path / "inexistente.joblib", "irrelevante.csv") is None
+
+
+def test_evaluate_incumbent_mede_o_modelo_publicado(corpus_csv: Path, tmp_path: Path):
+    particoes = prepare(str(corpus_csv), tmp_path / "interim", seed=42)
+    train_candidates(particoes["train"], particoes["validation"], tmp_path / "candidatos", seed=42)
+
+    modelo_publicado = tmp_path / "candidatos" / "logistic_regression.joblib"
+    incumbente = evaluate_incumbent(modelo_publicado, str(corpus_csv))
+
+    assert incumbente is not None
+    assert 0.0 <= incumbente["f1_macro"] <= 1.0
+    assert 0.0 <= incumbente["priority_recall_alta"] <= 1.0
 
 
 def test_publish_copia_o_campeao_quando_aprovado(tmp_path: Path):
@@ -107,21 +150,101 @@ def test_publish_copia_o_campeao_quando_aprovado(tmp_path: Path):
     candidato.write_bytes(b"modelo")
     destino = tmp_path / "publicado" / "model.joblib"
 
-    resultado = publish(str(candidato), destino, f1_macro=0.60, minimum=0.53)
+    resultado = publish(
+        str(candidato),
+        destino,
+        f1_macro=0.60,
+        priority_recall_alta=0.80,
+        baseline_f1_macro=None,
+        baseline_priority_recall_alta=None,
+        **GATE_PADRAO,
+    )
 
     assert Path(resultado) == destino
     assert destino.read_bytes() == b"modelo"
 
 
-def test_publish_falha_quando_o_modelo_regride(tmp_path: Path):
+def test_publish_falha_quando_o_modelo_regride_abaixo_do_piso(tmp_path: Path):
     candidato = tmp_path / "candidato.joblib"
     candidato.write_bytes(b"modelo ruim")
     destino = tmp_path / "publicado" / "model.joblib"
 
     with pytest.raises(QualityGateError, match="0.52"):
-        publish(str(candidato), destino, f1_macro=0.52, minimum=0.53)
+        publish(
+            str(candidato),
+            destino,
+            f1_macro=0.52,
+            priority_recall_alta=0.80,
+            baseline_f1_macro=None,
+            baseline_priority_recall_alta=None,
+            **GATE_PADRAO,
+        )
 
     assert not destino.exists()
+
+
+def test_publish_falha_quando_recall_de_prioridade_alta_fica_abaixo_do_piso(tmp_path: Path):
+    """f1-macro acima do piso não basta: a métrica de negócio também precisa passar."""
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"modelo com recall ruim em casos urgentes")
+    destino = tmp_path / "publicado" / "model.joblib"
+
+    with pytest.raises(QualityGateError, match="prioridade alta"):
+        publish(
+            str(candidato),
+            destino,
+            f1_macro=0.60,
+            priority_recall_alta=0.40,
+            baseline_f1_macro=None,
+            baseline_priority_recall_alta=None,
+            **GATE_PADRAO,
+        )
+
+    assert not destino.exists()
+
+
+def test_publish_falha_quando_nao_supera_o_incumbente(tmp_path: Path):
+    """Acima do piso não basta: um retreino pior que a produção não pode promover."""
+    destino = tmp_path / "model.joblib"
+    destino.write_bytes(b"modelo bom em producao")
+
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"modelo um pouco pior")
+
+    with pytest.raises(QualityGateError, match="produção"):
+        publish(
+            str(candidato),
+            destino,
+            f1_macro=0.55,
+            priority_recall_alta=0.80,
+            baseline_f1_macro=0.60,
+            baseline_priority_recall_alta=0.80,
+            **GATE_PADRAO,
+        )
+
+    assert destino.read_bytes() == b"modelo bom em producao"
+
+
+def test_publish_falha_quando_recall_de_prioridade_alta_regride(tmp_path: Path):
+    """f1-macro melhor não salva um candidato que piora a segurança da fila de triagem."""
+    destino = tmp_path / "model.joblib"
+    destino.write_bytes(b"modelo bom em producao")
+
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"modelo com f1 melhor mas recall de alta pior")
+
+    with pytest.raises(QualityGateError, match="prioridade alta"):
+        publish(
+            str(candidato),
+            destino,
+            f1_macro=0.65,
+            priority_recall_alta=0.70,
+            baseline_f1_macro=0.60,
+            baseline_priority_recall_alta=0.80,
+            **GATE_PADRAO,
+        )
+
+    assert destino.read_bytes() == b"modelo bom em producao"
 
 
 def test_publish_preserva_o_modelo_anterior_ao_reprovar(tmp_path: Path):
@@ -133,6 +256,89 @@ def test_publish_preserva_o_modelo_anterior_ao_reprovar(tmp_path: Path):
     candidato.write_bytes(b"modelo ruim")
 
     with pytest.raises(QualityGateError):
-        publish(str(candidato), destino, f1_macro=0.10, minimum=0.53)
+        publish(
+            str(candidato),
+            destino,
+            f1_macro=0.10,
+            priority_recall_alta=0.10,
+            baseline_f1_macro=None,
+            baseline_priority_recall_alta=None,
+            **GATE_PADRAO,
+        )
 
     assert destino.read_bytes() == b"modelo bom em producao"
+
+
+def _resumo(
+    f1_macro: float, priority_recall_alta: float, candidate_path: Path
+) -> dict[str, object]:
+    return {
+        "champion": "logistic_regression",
+        "f1_macro": f1_macro,
+        "priority_recall_alta": priority_recall_alta,
+        "candidate_path": str(candidate_path),
+    }
+
+
+def test_promote_registra_sucesso_no_historico(tmp_path: Path):
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"modelo")
+    destino = tmp_path / "publicado" / "model.joblib"
+
+    caminho = promote(
+        _resumo(0.60, 0.80, candidato), None, destino, tmp_path / "metricas", **GATE_PADRAO
+    )
+
+    assert Path(caminho) == destino
+    linhas = (
+        (tmp_path / "metricas" / "training_history.jsonl").read_text(encoding="utf-8").splitlines()
+    )
+    assert len(linhas) == 1
+
+    entrada = json.loads(linhas[0])
+    assert entrada["champion"] == "logistic_regression"
+    assert entrada["f1_macro"] == 0.60
+    assert entrada["promoted"] is True
+    assert entrada["rejection_reasons"] == []
+
+
+def test_promote_registra_reprovacao_e_ainda_levanta(tmp_path: Path):
+    """O histórico precisa capturar runs reprovados também, não só os promovidos."""
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"modelo ruim")
+    destino = tmp_path / "model.joblib"
+
+    with pytest.raises(QualityGateError):
+        promote(_resumo(0.10, 0.10, candidato), None, destino, tmp_path / "metricas", **GATE_PADRAO)
+
+    entrada = json.loads(
+        (tmp_path / "metricas" / "training_history.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert entrada["promoted"] is False
+    assert entrada["rejection_reasons"]
+    assert not destino.exists()
+
+
+def test_promote_acumula_execucoes_sem_sobrescrever(tmp_path: Path):
+    destino = tmp_path / "model.joblib"
+    metrics_dir = tmp_path / "metricas"
+
+    candidato1 = tmp_path / "c1.joblib"
+    candidato1.write_bytes(b"modelo 1")
+    promote(_resumo(0.60, 0.80, candidato1), None, destino, metrics_dir, **GATE_PADRAO)
+
+    candidato2 = tmp_path / "c2.joblib"
+    candidato2.write_bytes(b"modelo 2")
+    promote(
+        _resumo(0.65, 0.85, candidato2),
+        {"f1_macro": 0.60, "priority_recall_alta": 0.80},
+        destino,
+        metrics_dir,
+        **GATE_PADRAO,
+    )
+
+    linhas = (
+        (metrics_dir / "training_history.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    )
+    assert len(linhas) == 2
+    assert all(json.loads(linha)["promoted"] for linha in linhas)

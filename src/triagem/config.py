@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # do f1-macro de validação do campeão (0,5869), com margem de 0,05 para absorver a
     # variação natural entre retreinos sem transformar o gate em enfeite que sempre passa.
     min_f1_macro: float = 0.53
+
+    # Piso de recall na prioridade "alta" (cardiovascular + nervous system) — a métrica de
+    # negócio da triagem, não só a técnica: rebaixar um caso realmente urgente pesa mais do
+    # que confundir duas condições que já dariam na mesma prioridade. Calibrado em 0,72 a
+    # partir do recall do campeão no teste (0,7739), mesma margem de 0,05 do min_f1_macro.
+    min_priority_recall_alta: float = 0.72
+
     random_seed: int = 42
     validation_size: float = 0.2
 
