@@ -24,6 +24,10 @@ pytest-cov = "^6.0"
 ruff = "^0.7.4"
 pre-commit = "^4.0"
 
+[tool.poetry.group.notebooks.dependencies]
+jupyter = "^1.1"
+matplotlib = "^3.9"
+
 [build-system]
 requires = ["poetry-core>=2.0"]
 build-backend = "poetry.core.masonry.api"
