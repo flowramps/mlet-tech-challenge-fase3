@@ -332,6 +332,10 @@ de configuração manual. O JSON do dashboard é versionado em
 | Predições por condição | O que o modelo está prevendo? Uma classe engoliu as outras? |
 | Confiança das predições (p50/p90) | O modelo continua tão certo quanto antes? |
 
+Que valor em cada painel conta como alerta, e o que fazer quando disparar, está no
+[plano de monitoramento](docs/monitoring_plan.md) — os limiares vêm do comportamento real do
+campeão no teste, não são chutados.
+
 ## Como executar
 
 **Pré-requisitos:** Python 3.12, [Poetry](https://python-poetry.org/) 2.x e Docker.
@@ -491,7 +495,8 @@ docker/
 
 docs/
 ├── ml_canvas.md                arquitetura de decisão do projeto, nos 10 blocos de Dorard
-└── model_card.md               uso pretendido, limitações e riscos do modelo servido
+├── model_card.md               uso pretendido, limitações e riscos do modelo servido
+└── monitoring_plan.md          o que cada métrica significa, limiar de alerta e playbook
 ```
 
 A fronteira que sustenta o projeto é o Protocol `Classifier`: a API depende dele, não de

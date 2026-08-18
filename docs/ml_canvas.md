@@ -87,10 +87,13 @@ produção nos dois eixos, não só um piso fixo. Todo run fica registrado em
 
 Prometheus + Grafana instrumentam tanto a saúde do serviço (tráfego, latência, taxa de erro)
 quanto a saúde do modelo (predições por condição/prioridade, distribuição de confiança,
-latência de inferência por backend) — sinais que antecipam drift antes de virar incidente.
+latência de inferência por backend) — sinais que antecipam drift antes de virar incidente. O
+que cada painel significa, limiar de alerta e playbook de resposta está no
+[plano de monitoramento](monitoring_plan.md).
 **Não implementado:** loop de feedback formal (rótulo real do laudo depois de lido por um
 humano) e detecção estatística de drift (KS/PSI) — extensões naturais, presentes no repo
-irmão `grupo4`, mas fora do que o enunciado desta fase pede.
+irmão `grupo4`, mas fora do que o enunciado desta fase pede. Ambas as lacunas estão detalhadas
+na seção "Limitações conhecidas" do plano de monitoramento.
 
 ## Resumo do estado atual
 
