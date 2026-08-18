@@ -148,7 +148,8 @@ defeito de ajuste: as classes não são mutuamente exclusivas.
 
 O [model card](docs/model_card.md) consolida uso pretendido, limitações e cenários de falha
 conhecidos do modelo servido — incluindo os que não aparecem nas métricas, como o corpus ser
-em inglês.
+em inglês. O [ML Canvas](docs/ml_canvas.md) documenta as decisões de arquitetura do projeto
+como um todo, dado → decisão → predição → monitoramento, não só o modelo isolado.
 
 **Sobre reprodutibilidade:** as sementes estão fixadas, mas os valores variam na terceira
 casa decimal entre máquinas diferentes — o mesmo commit rendeu f1-macro 0,5812 localmente e
@@ -196,10 +197,14 @@ nuvem sem provisionar recursos, então o gatilho automático está desligado de 
 
 ### Pipeline de treino
 
-A DAG `triagem_training` encadeia cinco tarefas:
+A DAG `triagem_training` encadeia seis tarefas. `avaliar_incumbente` só depende do corpus, não
+do treino dos candidatos, então roda em paralelo com `preparo`/`treino`/`selecao` em vez de
+esperá-los:
 
 ```
-ingestao -> preparo -> treino -> selecao -> publicacao
+ingestao --+--> preparo --> treino --> selecao --+
+           |                                      |
+           +--> avaliar_incumbente ---------------+--> publicacao
 ```
 
 | Tarefa | Responsabilidade |
@@ -207,8 +212,9 @@ ingestao -> preparo -> treino -> selecao -> publicacao
 | `ingestao` | Baixa o corpus público, reaproveitando o que já está em disco |
 | `preparo` | Valida o schema e separa a validação, estratificada |
 | `treino` | Treina os dois candidatos e pontua cada um na validação |
-| `selecao` | Escolhe o campeão e mede o desempenho no conjunto de teste |
-| `publicacao` | Promove o campeão, sujeito ao gate de qualidade |
+| `selecao` | Escolhe o campeão e mede o desempenho (f1-macro, recall de prioridade alta) no teste |
+| `avaliar_incumbente` | Mede o mesmo desempenho do modelo *hoje em produção*, do zero, no mesmo teste |
+| `publicacao` | Decide a promoção pelo gate de 4 critérios e registra o resultado no histórico |
 
 A DAG é um invólucro fino: cada tarefa delega para uma função de
 `src/triagem/pipeline/steps.py`, testada isoladamente na suíte. O que a DAG declara é a
@@ -223,17 +229,49 @@ cada etapa produziu quando algo falha.
 
 ### Gate de qualidade
 
-A tarefa `publicacao` só promove o modelo se o f1-macro atingir `min_f1_macro = 0,53`.
+A tarefa `publicacao` promove o candidato só se ele passar em quatro critérios — dois pisos
+absolutos e dois de não regressão contra o incumbente (`_gate_failures`/`should_promote` em
+`src/triagem/pipeline/steps.py`):
 
-Esse número não é arbitrário: é o f1-macro de validação do campeão (0,587) menos uma margem
-de 0,05, que absorve a variação natural entre retreinos sem transformar o gate em enfeite
-que sempre passa.
+1. **Piso de f1-macro:** f1-macro (teste) ≥ `min_f1_macro = 0,53`. Esse número não é
+   arbitrário: é o f1-macro de validação do campeão (0,587) menos uma margem de 0,05, que
+   absorve a variação natural entre retreinos sem transformar o gate em enfeite que sempre
+   passa.
+2. **Piso de recall na prioridade "alta"** (`min_priority_recall_alta = 0,72`) — a **métrica
+   de negócio** da triagem, não só a técnica. `cardiovascular diseases` e
+   `nervous system diseases` mapeiam para prioridade "alta"
+   (`src/triagem/inference/priority.py`); o recall dessa prioridade mede a fração de casos
+   *realmente* urgentes que o modelo não rebaixa para a fila de menor prioridade. Rebaixar um
+   caso urgente pesa mais do que confundir duas condições que já dariam na mesma prioridade —
+   f1-macro sozinho não enxerga essa assimetria. Calibrado a partir do recall do campeão no
+   teste (0,7739) com a mesma margem de 0,05 do piso de f1-macro.
+3. **Superar o incumbente em f1-macro:** o candidato precisa bater, estritamente, o f1-macro
+   do modelo *hoje em produção* — reavaliado do zero no mesmo conjunto de teste pela tarefa
+   `avaliar_incumbente`, não lido de um arquivo de métricas que o próprio run sobrescreve.
+4. **Não regredir no recall de prioridade alta:** o candidato pode empatar, mas não pode ficar
+   abaixo do recall de prioridade alta do incumbente — um f1-macro melhor não compensa piorar
+   a segurança da fila de triagem.
 
-Reprovando, a tarefa falha e **o artefato publicado não é tocado** — o modelo que já está
-atendendo continua no ar. Um retreino ruim não derruba produção. O comportamento é coberto
-por teste (`test_publish_preserva_o_modelo_anterior_ao_reprovar`) e foi verificado na prática
-forçando um piso impossível: a DAG falha na publicação e o `model.joblib` permanece
-inalterado.
+Critérios 3 e 4 só se aplicam quando já existe um modelo publicado; sem incumbente (primeiro
+treino), só os pisos absolutos (1 e 2) valem.
+
+Reprovando em qualquer um dos quatro, a tarefa falha e **o artefato publicado não é tocado** —
+o modelo que já está atendendo continua no ar. Um retreino ruim, ou simplesmente não melhor —
+tecnicamente ou na métrica de negócio —, não derruba produção. O comportamento é coberto por
+teste (`test_publish_preserva_o_modelo_anterior_ao_reprovar`,
+`test_publish_falha_quando_nao_supera_o_incumbente`,
+`test_publish_falha_quando_recall_de_prioridade_alta_regride`) e foi verificado na prática: um
+segundo `make train` sobre o mesmo dado e seed treina um candidato idêntico ao incumbente e é
+corretamente recusado (`f1_macro 0.5802 não supera o modelo em produção (0.5802)`).
+
+### Histórico de execuções
+
+Cada chamada à tarefa `publicacao` (via `promote()`) acrescenta uma linha a
+`metrics/training_history.jsonl` — promovido ou não, com os quatro números do gate e, se
+reprovado, o motivo. Um arquivo por linha (JSON Lines), nunca reescrito: dá para comparar
+retreinos ao longo do tempo, e nenhum run reprovado fica sem rastro. `metrics/metrics.json` e
+`metrics/model_selection.json`, em contraste, guardam só o *último* run — o histórico existe
+justamente para o que esses dois arquivos não cobrem.
 
 ## Observabilidade
 
@@ -294,6 +332,10 @@ de configuração manual. O JSON do dashboard é versionado em
 | Predições por condição | O que o modelo está prevendo? Uma classe engoliu as outras? |
 | Confiança das predições (p50/p90) | O modelo continua tão certo quanto antes? |
 
+Que valor em cada painel conta como alerta, e o que fazer quando disparar, está no
+[plano de monitoramento](docs/monitoring_plan.md) — os limiares vêm do comportamento real do
+campeão no teste, não são chutados.
+
 ## Como executar
 
 **Pré-requisitos:** Python 3.12, [Poetry](https://python-poetry.org/) 2.x e Docker.
@@ -351,8 +393,8 @@ make airflow-test    # executa a DAG de ponta a ponta (~40s)
 make airflow-down
 ```
 
-O Airflow sobe em **um único container** (`LocalExecutor` com SQLite): uma DAG linear de
-cinco tarefas não justifica um container de banco só para a demonstração.
+O Airflow sobe em **um único container** (`LocalExecutor` com SQLite): uma DAG de seis
+tarefas não justifica um container de banco só para a demonstração.
 
 Ele tem compose próprio, separado da stack de observabilidade, e a razão é prática: quem
 quiser ver o dashboard não precisa subir o Airflow, e quem quiser rodar a DAG não precisa
@@ -452,7 +494,9 @@ docker/
 └── grafana/                    fonte de dados e dashboard provisionados por arquivo
 
 docs/
-└── model_card.md               uso pretendido, limitações e riscos do modelo servido
+├── ml_canvas.md                arquitetura de decisão do projeto, nos 10 blocos de Dorard
+├── model_card.md               uso pretendido, limitações e riscos do modelo servido
+└── monitoring_plan.md          o que cada métrica significa, limiar de alerta e playbook
 ```
 
 A fronteira que sustenta o projeto é o Protocol `Classifier`: a API depende dele, não de

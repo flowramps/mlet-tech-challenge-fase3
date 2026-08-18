@@ -50,6 +50,12 @@ a ponta no container.
 - **Idioma.** O corpus é em inglês. Um laudo em português é fora de distribuição: o modelo
   responde, mas a predição não é confiável. Uso em produção exigiria corpus no idioma real
   dos laudos.
+- **Teto de rótulo ambíguo.** ~26% dos textos únicos do corpus (train+test) se repetem sob
+  rótulos diferentes — provável resíduo de uma versão multi-rótulo do dataset original
+  achatada para um único rótulo por linha. Como a vetorização é determinística, isso impõe
+  um teto teórico de ~78% de acurácia para qualquer classificador baseado só no texto: o
+  f1-macro de 0,581 do campeão precisa ser lido contra esse teto, não contra 1,0. Análise
+  completa em `notebooks/01_eda.ipynb` ("Duplicatas e ambiguidade de rótulo").
 - **Classe guarda-chuva.** `general pathological conditions` tem recall 0,32: é a maior
   classe do conjunto e se sobrepõe semanticamente às outras quatro. É o teto do problema
   (classes não mutuamente exclusivas), não um defeito de ajuste.
@@ -70,9 +76,15 @@ não persiste o texto dos laudos, e o container roda sem privilégios.
 
 ## 7. Manutenção e retreino
 
-Retreino semanal pela DAG `triagem_training` (ou `make train`), com gate de qualidade:
-um candidato só é promovido com f1-macro ≥ 0,53 na validação. Reprovado, o run falha e o
-modelo publicado **não é tocado** — um retreino ruim não derruba produção.
+Retreino semanal pela DAG `triagem_training` (ou `make train`), com gate de qualidade em
+quatro critérios: f1-macro (teste) ≥ 0,53; recall na prioridade "alta" ≥ 0,72 — a **métrica de
+negócio**, não só a técnica (seção 6); e, quando já existe modelo publicado, superar
+estritamente o f1-macro do incumbente **e** não regredir no recall de prioridade alta. Ambos
+reavaliados no mesmo teste a cada run, não lidos de um arquivo de métricas desatualizado.
+Reprovado em qualquer um dos quatro, o run falha e o modelo publicado **não é tocado** — um
+retreino ruim, ou simplesmente não melhor que o incumbente (tecnicamente ou na métrica de
+negócio), não derruba produção. Todo run — promovido ou não — fica registrado em
+`metrics/training_history.jsonl`. Detalhes em "Gate de qualidade" no README.
 
 ## 8. Monitoramento em produção
 

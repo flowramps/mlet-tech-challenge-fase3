@@ -12,8 +12,10 @@ quando algo dá errado.
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 from triagem.data.download import download_dataset
@@ -24,7 +26,7 @@ from triagem.data.prepare import (
     load_split,
     split_train_validation,
 )
-from triagem.model.evaluate import evaluate_model, save_metrics
+from triagem.model.evaluate import evaluate_model, priority_recall, save_metrics
 from triagem.model.train import (
     MODEL_TYPES,
     load_bundle,
@@ -126,10 +128,14 @@ def select_and_evaluate(
     bundle = load_bundle(caminho_campeao)
 
     teste = load_split(Path(test_csv))
+    predicoes = bundle["pipeline"].predict(teste[TEXT_COLUMN])
     metricas = evaluate_model(
         bundle["pipeline"], teste[TEXT_COLUMN], teste[LABEL_COLUMN], CONDITION_NAMES
     )
-    save_metrics(metricas, destino_metricas / "metrics.json")
+    recall_alta = priority_recall(teste[LABEL_COLUMN], predicoes, CONDITION_NAMES, priority="alta")
+    save_metrics(
+        {**metricas, "priority_recall_alta": recall_alta}, destino_metricas / "metrics.json"
+    )
 
     save_metrics(
         {
@@ -142,45 +148,232 @@ def select_and_evaluate(
     )
 
     logger.info(
-        "campeão=%s f1_macro(teste)=%.4f accuracy(teste)=%.4f",
+        "campeão=%s f1_macro(teste)=%.4f accuracy(teste)=%.4f priority_recall_alta(teste)=%.4f",
         campeao,
         metricas["f1_macro"],
         metricas["accuracy"],
+        recall_alta,
     )
 
     return {
         "champion": campeao,
         "f1_macro": float(metricas["f1_macro"]),
         "accuracy": float(metricas["accuracy"]),
+        "priority_recall_alta": float(recall_alta),
         "candidate_path": str(caminho_campeao),
     }
 
 
-def should_publish(f1_macro: float, minimum: float) -> bool:
-    """Decide se o modelo atinge o piso de qualidade."""
-    return f1_macro >= minimum
+def evaluate_incumbent(model_path: Path | str, test_csv: str) -> dict[str, float] | None:
+    """Mede o desempenho do modelo atualmente publicado, como baseline da promoção.
+
+    ``None`` sem modelo publicado ainda — é o caso de bootstrap, sem incumbente para
+    comparar. Reavalia o incumbente do zero em vez de ler ``metrics/metrics.json``: esse
+    arquivo é sobrescrito por :func:`select_and_evaluate` com os números do *candidato*
+    antes da decisão de promoção, então não serve de registro do que está em produção.
+    """
+    caminho = Path(model_path)
+    if not caminho.exists():
+        return None
+
+    bundle = load_bundle(caminho)
+    teste = load_split(Path(test_csv))
+    predicoes = bundle["pipeline"].predict(teste[TEXT_COLUMN])
+    metricas = evaluate_model(
+        bundle["pipeline"], teste[TEXT_COLUMN], teste[LABEL_COLUMN], CONDITION_NAMES
+    )
+    recall_alta = priority_recall(teste[LABEL_COLUMN], predicoes, CONDITION_NAMES, priority="alta")
+    return {"f1_macro": float(metricas["f1_macro"]), "priority_recall_alta": float(recall_alta)}
+
+
+def _gate_failures(
+    candidate_f1_macro: float,
+    candidate_priority_recall_alta: float,
+    baseline_f1_macro: float | None,
+    baseline_priority_recall_alta: float | None,
+    *,
+    min_f1_macro: float,
+    min_priority_recall_alta: float,
+) -> list[str]:
+    """Lista os critérios do gate de promoção que o candidato não cumpre — vazia se passou."""
+    motivos: list[str] = []
+    if candidate_f1_macro < min_f1_macro:
+        motivos.append(f"f1_macro {candidate_f1_macro:.4f} abaixo do mínimo {min_f1_macro:.4f}")
+    if candidate_priority_recall_alta < min_priority_recall_alta:
+        motivos.append(
+            f"recall de prioridade alta {candidate_priority_recall_alta:.4f} abaixo do "
+            f"mínimo {min_priority_recall_alta:.4f}"
+        )
+    if baseline_f1_macro is not None and baseline_priority_recall_alta is not None:
+        if candidate_f1_macro <= baseline_f1_macro:
+            motivos.append(
+                f"f1_macro {candidate_f1_macro:.4f} não supera o modelo em produção "
+                f"({baseline_f1_macro:.4f})"
+            )
+        if candidate_priority_recall_alta < baseline_priority_recall_alta:
+            motivos.append(
+                f"recall de prioridade alta {candidate_priority_recall_alta:.4f} regride em "
+                f"relação ao modelo em produção ({baseline_priority_recall_alta:.4f})"
+            )
+    return motivos
+
+
+def should_promote(
+    candidate_f1_macro: float,
+    candidate_priority_recall_alta: float,
+    baseline_f1_macro: float | None,
+    baseline_priority_recall_alta: float | None,
+    *,
+    min_f1_macro: float,
+    min_priority_recall_alta: float,
+) -> bool:
+    """Decide se o candidato deve substituir o modelo em produção.
+
+    Dois pisos absolutos — f1-macro e recall da prioridade "alta" — e, quando já existe um
+    incumbente, dois critérios de não regressão: superar seu f1-macro estritamente, e não
+    piorar o recall de prioridade alta. O recall de prioridade alta é a métrica de negócio da
+    triagem: rebaixar um caso realmente urgente (cardiovascular/nervous system) pesa mais do
+    que confundir duas condições que já dariam na mesma prioridade — f1-macro sozinho não
+    enxerga essa assimetria.
+    """
+    return not _gate_failures(
+        candidate_f1_macro,
+        candidate_priority_recall_alta,
+        baseline_f1_macro,
+        baseline_priority_recall_alta,
+        min_f1_macro=min_f1_macro,
+        min_priority_recall_alta=min_priority_recall_alta,
+    )
 
 
 def publish(
     candidate_path: str,
     model_path: Path | str,
     f1_macro: float,
-    minimum: float,
+    priority_recall_alta: float,
+    *,
+    min_f1_macro: float,
+    min_priority_recall_alta: float,
+    baseline_f1_macro: float | None,
+    baseline_priority_recall_alta: float | None,
 ) -> str:
     """Promove o campeão a modelo servido, se ele passar no gate.
 
     Reprovando, levanta :class:`QualityGateError` **sem tocar no artefato publicado**: um
     retreino ruim não pode derrubar o modelo que já está atendendo em produção.
     """
-    if not should_publish(f1_macro, minimum):
+    motivos = _gate_failures(
+        f1_macro,
+        priority_recall_alta,
+        baseline_f1_macro,
+        baseline_priority_recall_alta,
+        min_f1_macro=min_f1_macro,
+        min_priority_recall_alta=min_priority_recall_alta,
+    )
+    if motivos:
         raise QualityGateError(
-            f"f1_macro {f1_macro:.4f} abaixo do mínimo {minimum:.4f} — "
-            "modelo não promovido, o anterior segue em uso"
+            "; ".join(motivos) + " — modelo não promovido, o anterior segue em uso"
         )
 
     destino = Path(model_path)
     destino.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(candidate_path, destino)
 
-    logger.info("modelo promovido: %s (f1_macro=%.4f)", destino, f1_macro)
+    logger.info(
+        "modelo promovido: %s (f1_macro=%.4f, priority_recall_alta=%.4f)",
+        destino,
+        f1_macro,
+        priority_recall_alta,
+    )
     return str(destino)
+
+
+def _append_history(
+    history_path: Path | str,
+    *,
+    champion: str,
+    f1_macro: float,
+    priority_recall_alta: float,
+    baseline_f1_macro: float | None,
+    baseline_priority_recall_alta: float | None,
+    promoted: bool,
+    rejection_reasons: list[str],
+) -> None:
+    """Acrescenta uma linha ao histórico de execuções do pipeline, em JSON Lines.
+
+    Uma linha por execução, nunca reescrita: cada run só precisa acrescentar, nunca reler o
+    que já existe, e uma escrita interrompida no meio derruba só a última linha, não o
+    histórico inteiro — ao contrário de reescrever um único JSON a cada run.
+    """
+    caminho = Path(history_path)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    entrada = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "champion": champion,
+        "f1_macro": round(f1_macro, 4),
+        "priority_recall_alta": round(priority_recall_alta, 4),
+        "baseline_f1_macro": (
+            round(baseline_f1_macro, 4) if baseline_f1_macro is not None else None
+        ),
+        "baseline_priority_recall_alta": (
+            round(baseline_priority_recall_alta, 4)
+            if baseline_priority_recall_alta is not None
+            else None
+        ),
+        "promoted": promoted,
+        "rejection_reasons": rejection_reasons,
+    }
+    with caminho.open("a", encoding="utf-8") as arquivo:
+        arquivo.write(json.dumps(entrada, ensure_ascii=False) + "\n")
+
+
+def promote(
+    resumo: dict[str, object],
+    incumbente: dict[str, float] | None,
+    model_path: Path | str,
+    metrics_dir: Path | str,
+    *,
+    min_f1_macro: float,
+    min_priority_recall_alta: float,
+) -> str:
+    """Decide a promoção do campeão (via :func:`publish`) e registra o resultado — promovido
+    ou não, e por quê — em ``metrics_dir/training_history.jsonl``.
+
+    Ponto de entrada recomendado para as orquestrações (execução local e DAG): chamar
+    :func:`publish` diretamente decide a promoção mas deixa o run de fora do histórico.
+    """
+    f1_macro = float(resumo["f1_macro"])
+    priority_recall_alta = float(resumo["priority_recall_alta"])
+    baseline_f1_macro = incumbente["f1_macro"] if incumbente else None
+    baseline_priority_recall_alta = incumbente["priority_recall_alta"] if incumbente else None
+
+    motivos = _gate_failures(
+        f1_macro,
+        priority_recall_alta,
+        baseline_f1_macro,
+        baseline_priority_recall_alta,
+        min_f1_macro=min_f1_macro,
+        min_priority_recall_alta=min_priority_recall_alta,
+    )
+
+    _append_history(
+        Path(metrics_dir) / "training_history.jsonl",
+        champion=str(resumo["champion"]),
+        f1_macro=f1_macro,
+        priority_recall_alta=priority_recall_alta,
+        baseline_f1_macro=baseline_f1_macro,
+        baseline_priority_recall_alta=baseline_priority_recall_alta,
+        promoted=not motivos,
+        rejection_reasons=motivos,
+    )
+
+    return publish(
+        str(resumo["candidate_path"]),
+        model_path,
+        f1_macro,
+        priority_recall_alta,
+        min_f1_macro=min_f1_macro,
+        min_priority_recall_alta=min_priority_recall_alta,
+        baseline_f1_macro=baseline_f1_macro,
+        baseline_priority_recall_alta=baseline_priority_recall_alta,
+    )

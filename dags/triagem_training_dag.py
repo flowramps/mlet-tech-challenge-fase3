@@ -5,7 +5,8 @@ A DAG é deliberadamente fina: cada tarefa delega para uma função de
 declara aqui é a topologia — ordem, agendamento e política de retentativa — não a lógica.
 
 Encadeamento: ingestão -> preparo -> treino dos candidatos -> seleção e avaliação ->
-publicação com gate de qualidade.
+publicação com gate de qualidade. A avaliação do incumbente (modelo hoje em produção) roda
+em paralelo, pois só depende da ingestão, não do treino dos candidatos.
 """
 
 from __future__ import annotations
@@ -18,9 +19,10 @@ import pendulum
 from airflow.sdk import dag, task
 
 from triagem.pipeline.steps import (
+    evaluate_incumbent,
     ingest,
     prepare,
-    publish,
+    promote,
     select_and_evaluate,
     train_candidates,
 )
@@ -30,6 +32,7 @@ MODELS_DIR = Path(os.environ.get("TRIAGEM_MODELS_DIR", "/opt/airflow/models"))
 METRICS_DIR = Path(os.environ.get("TRIAGEM_METRICS_DIR", "/opt/airflow/metrics"))
 
 MIN_F1_MACRO = float(os.environ.get("TRIAGEM_MIN_F1_MACRO", "0.53"))
+MIN_PRIORITY_RECALL_ALTA = float(os.environ.get("TRIAGEM_MIN_PRIORITY_RECALL_ALTA", "0.72"))
 RANDOM_SEED = int(os.environ.get("TRIAGEM_RANDOM_SEED", "42"))
 VALIDATION_SIZE = float(os.environ.get("TRIAGEM_VALIDATION_SIZE", "0.2"))
 MODEL_VERSION = os.environ.get("TRIAGEM_MODEL_VERSION", "1.0.0")
@@ -83,20 +86,34 @@ def triagem_training():
         return select_and_evaluate(scores, MODELS_DIR / "candidates", corpus["test"], METRICS_DIR)
 
     @task
-    def publicacao(resumo: dict[str, object]) -> str:
-        """Promove o campeão, ou falha o run se ele regredir abaixo do piso."""
-        return publish(
-            str(resumo["candidate_path"]),
+    def avaliar_incumbente(corpus: dict[str, str]) -> dict[str, float] | None:
+        """Mede o desempenho do modelo hoje em produção — baseline da decisão de promoção.
+
+        Independente do treino dos candidatos: só depende do corpus, então roda em
+        paralelo com ``treino``/``selecao`` em vez de esperá-los.
+        """
+        return evaluate_incumbent(MODELS_DIR / "model.joblib", corpus["test"])
+
+    @task
+    def publicacao(resumo: dict[str, object], incumbente: dict[str, float] | None) -> str:
+        """Promove o campeão — ou falha o run se ele regredir no piso, no incumbente, ou na
+        métrica de negócio (recall de prioridade alta) — e registra o resultado no histórico
+        de treinos (``metrics/training_history.jsonl``)."""
+        return promote(
+            resumo,
+            incumbente,
             MODELS_DIR / "model.joblib",
-            float(resumo["f1_macro"]),
-            MIN_F1_MACRO,
+            METRICS_DIR,
+            min_f1_macro=MIN_F1_MACRO,
+            min_priority_recall_alta=MIN_PRIORITY_RECALL_ALTA,
         )
 
     corpus = ingestao()
     particoes = preparo(corpus)
     scores = treino(particoes)
     resumo = selecao(scores, corpus)
-    publicacao(resumo)
+    incumbente = avaliar_incumbente(corpus)
+    publicacao(resumo, incumbente)
 
 
 triagem_training()

@@ -11,9 +11,10 @@ import logging
 
 from triagem.config import Settings, get_settings
 from triagem.pipeline.steps import (
+    evaluate_incumbent,
     ingest,
     prepare,
-    publish,
+    promote,
     select_and_evaluate,
     train_candidates,
 )
@@ -47,14 +48,18 @@ def run_pipeline(settings: Settings) -> dict[str, object]:
         settings.metrics_dir,
     )
 
-    publicado = publish(
-        str(resumo["candidate_path"]),
+    incumbente = evaluate_incumbent(settings.model_path, corpus["test"])
+
+    publicado = promote(
+        resumo,
+        incumbente,
         settings.model_path,
-        float(resumo["f1_macro"]),
-        settings.min_f1_macro,
+        settings.metrics_dir,
+        min_f1_macro=settings.min_f1_macro,
+        min_priority_recall_alta=settings.min_priority_recall_alta,
     )
 
-    return {**resumo, "published_path": publicado}
+    return {**resumo, "published_path": publicado, "baseline": incumbente}
 
 
 def main() -> None:
