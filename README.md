@@ -148,7 +148,8 @@ defeito de ajuste: as classes não são mutuamente exclusivas.
 
 O [model card](docs/model_card.md) consolida uso pretendido, limitações e cenários de falha
 conhecidos do modelo servido — incluindo os que não aparecem nas métricas, como o corpus ser
-em inglês.
+em inglês. O [ML Canvas](docs/ml_canvas.md) documenta as decisões de arquitetura do projeto
+como um todo, dado → decisão → predição → monitoramento, não só o modelo isolado.
 
 **Sobre reprodutibilidade:** as sementes estão fixadas, mas os valores variam na terceira
 casa decimal entre máquinas diferentes — o mesmo commit rendeu f1-macro 0,5812 localmente e
@@ -484,6 +485,7 @@ docker/
 └── grafana/                    fonte de dados e dashboard provisionados por arquivo
 
 docs/
+├── ml_canvas.md                arquitetura de decisão do projeto, nos 10 blocos de Dorard
 └── model_card.md               uso pretendido, limitações e riscos do modelo servido
 ```
 
