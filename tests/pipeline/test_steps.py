@@ -97,8 +97,11 @@ def test_select_and_evaluate_resume_o_campeao(corpus_csv: Path, tmp_path: Path):
     assert 0.0 <= resumo["f1_macro"] <= 1.0
     assert 0.0 <= resumo["priority_recall_alta"] <= 1.0
     assert Path(resumo["candidate_path"]).exists()
-    assert (tmp_path / "metricas" / "metrics.json").exists()
+    assert (tmp_path / "metricas" / "candidate_metrics.json").exists()
     assert (tmp_path / "metricas" / "model_selection.json").exists()
+    # `metrics.json` descreve o modelo *publicado*: avaliar um candidato não pode reescrevê-lo
+    # antes de a promoção ser decidida, senão o arquivo passa a mentir sobre o que está no ar.
+    assert not (tmp_path / "metricas" / "metrics.json").exists()
 
 
 GATE_PADRAO = {"min_f1_macro": 0.53, "min_priority_recall_alta": 0.5}
@@ -359,6 +362,63 @@ def test_promote_registra_reprovacao_e_ainda_levanta(tmp_path: Path):
     assert entrada["promoted"] is False
     assert entrada["rejection_reasons"]
     assert not destino.exists()
+
+
+def test_promote_publica_as_metricas_junto_com_o_modelo(tmp_path: Path):
+    """Promover o artefato e promover as métricas dele é a mesma operação.
+
+    `metrics.json` é a resposta a "quanto vale o modelo que está atendendo?" — se ele fosse
+    escrito na avaliação do candidato, um run que não promove deixaria o arquivo descrevendo
+    um modelo que nunca entrou no ar.
+    """
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"modelo")
+    metrics_dir = tmp_path / "metricas"
+    metrics_dir.mkdir()
+    (metrics_dir / "candidate_metrics.json").write_text(
+        json.dumps({"f1_macro": 0.60, "priority_recall_alta": 0.80}), encoding="utf-8"
+    )
+
+    promote(
+        _resumo(0.60, 0.80, candidato),
+        None,
+        tmp_path / "publicado" / "model.joblib",
+        metrics_dir,
+        **GATE_PADRAO,
+    )
+
+    publicadas = json.loads((metrics_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert publicadas["f1_macro"] == 0.60
+
+
+def test_promote_nao_toca_nas_metricas_publicadas_quando_nao_promove(tmp_path: Path):
+    """Run que não promove deixa `metrics.json` como estava — ele descreve o que segue no ar."""
+    destino = tmp_path / "model.joblib"
+    destino.write_bytes(b"modelo em producao")
+
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"candidato identico")
+
+    metrics_dir = tmp_path / "metricas"
+    metrics_dir.mkdir()
+    (metrics_dir / "metrics.json").write_text(
+        json.dumps({"f1_macro": 0.60, "origem": "modelo em producao"}), encoding="utf-8"
+    )
+    (metrics_dir / "candidate_metrics.json").write_text(
+        json.dumps({"f1_macro": 0.60, "origem": "candidato"}), encoding="utf-8"
+    )
+
+    with pytest.raises(ModelNotPromoted):
+        promote(
+            _resumo(0.60, 0.80, candidato),
+            {"f1_macro": 0.60, "priority_recall_alta": 0.80},
+            destino,
+            metrics_dir,
+            **GATE_PADRAO,
+        )
+
+    publicadas = json.loads((metrics_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert publicadas["origem"] == "modelo em producao"
 
 
 def test_promote_registra_no_historico_quando_apenas_nao_promove(tmp_path: Path):

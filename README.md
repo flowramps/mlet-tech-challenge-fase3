@@ -282,9 +282,20 @@ duas vezes seguidas e conclui, sem promover na segunda).
 Cada chamada à tarefa `publicacao` (via `promote()`) acrescenta uma linha a
 `metrics/training_history.jsonl` — promovido ou não, com os quatro números do gate e, se
 reprovado, o motivo. Um arquivo por linha (JSON Lines), nunca reescrito: dá para comparar
-retreinos ao longo do tempo, e nenhum run reprovado fica sem rastro. `metrics/metrics.json` e
-`metrics/model_selection.json`, em contraste, guardam só o *último* run — o histórico existe
-justamente para o que esses dois arquivos não cobrem.
+retreinos ao longo do tempo, e nenhum run reprovado fica sem rastro.
+
+O diretório `metrics/` separa o que é **candidato** do que está **publicado** — a distinção
+importa justamente porque nem todo run promove:
+
+| Arquivo | Descreve | Escrito por |
+|---|---|---|
+| `candidate_metrics.json` | O candidato recém-avaliado, tenha ele sido promovido ou não | `select_and_evaluate()` |
+| `metrics.json` | O modelo que está **atendendo agora** | `promote()`, só quando promove |
+| `model_selection.json` | Qual candidato venceu a disputa e com que score | `select_and_evaluate()` |
+| `training_history.jsonl` | Todas as execuções, append-only | `promote()`, sempre |
+
+Sem essa separação, um retreino recusado deixaria `metrics.json` descrevendo um modelo que
+nunca entrou no ar — e é dele que saem os números do [Model Card](docs/model_card.md).
 
 ## Observabilidade
 

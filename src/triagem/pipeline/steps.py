@@ -151,8 +151,12 @@ def select_and_evaluate(
         bundle["pipeline"], teste[TEXT_COLUMN], teste[LABEL_COLUMN], CONDITION_NAMES
     )
     recall_alta = priority_recall(teste[LABEL_COLUMN], predicoes, CONDITION_NAMES, priority="alta")
+    # `candidate_metrics.json`, não `metrics.json`: neste ponto o candidato ainda não passou
+    # pelo gate. `metrics.json` responde "quanto vale o modelo que está atendendo?" e só pode
+    # ser reescrito quando um modelo novo de fato entra no ar — ver :func:`promote`.
     save_metrics(
-        {**metricas, "priority_recall_alta": recall_alta}, destino_metricas / "metrics.json"
+        {**metricas, "priority_recall_alta": recall_alta},
+        destino_metricas / "candidate_metrics.json",
     )
 
     save_metrics(
@@ -439,7 +443,7 @@ def promote(
         rejection_reasons=motivos,
     )
 
-    return publish(
+    publicado = publish(
         str(resumo["candidate_path"]),
         model_path,
         f1_macro,
@@ -449,3 +453,13 @@ def promote(
         baseline_f1_macro=baseline_f1_macro,
         baseline_priority_recall_alta=baseline_priority_recall_alta,
     )
+
+    # A avaliação do candidato vira a avaliação do modelo publicado no exato momento em que o
+    # artefato é promovido — mesma operação, dois arquivos. Copiar em vez de reescrever a
+    # partir do resumo preserva o conjunto completo de métricas (matriz de confusão, suporte
+    # por classe), que o resumo não carrega.
+    candidatas = Path(metrics_dir) / "candidate_metrics.json"
+    if candidatas.exists():
+        shutil.copy2(candidatas, Path(metrics_dir) / "metrics.json")
+
+    return publicado
