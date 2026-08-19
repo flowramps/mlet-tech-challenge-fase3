@@ -75,6 +75,10 @@ def test_run_pipeline_encadeia_as_etapas_e_promove_o_bootstrap(tmp_path: Path, f
     assert Path(resumo["published_path"]) == settings.model_path
     assert settings.model_path.exists()
     assert (settings.metrics_dir / "training_history.jsonl").exists()
+    # A exportação ONNX fecha o pipeline: promover o modelo e publicar o grafo otimizado
+    # correspondente é a mesma entrega — servir `onnx` nunca deve significar servir outro modelo.
+    assert settings.onnx_path.exists()
+    assert settings.onnx_int8_path.exists()
 
 
 def test_run_pipeline_nao_promove_retreino_identico_mas_conclui_sem_erro(
@@ -98,6 +102,9 @@ def test_run_pipeline_nao_promove_retreino_identico_mas_conclui_sem_erro(
     assert segundo["published_path"] is None
     assert segundo["rejection_reasons"]
     assert settings.model_path.exists()  # o modelo anterior segue publicado
+
+    # Nada promovido, nada reexportado: o .onnx continua correspondendo ao modelo no ar.
+    assert segundo["onnx_path"] is None
 
     linhas = (
         (settings.metrics_dir / "training_history.jsonl")

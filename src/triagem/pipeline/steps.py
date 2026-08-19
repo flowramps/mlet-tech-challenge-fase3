@@ -364,6 +364,33 @@ def publish(
     return str(destino)
 
 
+def export_onnx(
+    model_path: Path | str,
+    onnx_path: Path | str,
+    onnx_int8_path: Path | str,
+) -> dict[str, str]:
+    """Converte o modelo **publicado** para ONNX e gera a variante INT8.
+
+    Parte de ``model.joblib``, não do candidato, e por isso roda depois da promoção: exportar
+    antes produziria um ``.onnx`` divergente do que está servindo sempre que o gate recusasse
+    o candidato. Na DAG isso é automático — a tarefa fica a jusante de ``publicacao``, então
+    um run que não promove também não reexporta.
+    """
+    from triagem.model.export_onnx import export_pipeline, quantize_dynamic_int8
+
+    bundle = load_bundle(Path(model_path))
+    caminho = export_pipeline(
+        bundle["pipeline"],
+        onnx_path,
+        labels_by_id=bundle["labels"],
+        version=bundle["version"],
+        model_type=bundle.get("model_type", "desconhecido"),
+    )
+    quantizado = quantize_dynamic_int8(caminho, onnx_int8_path)
+
+    return {"onnx": str(caminho), "onnx_int8": str(quantizado)}
+
+
 def _append_history(
     history_path: Path | str,
     *,

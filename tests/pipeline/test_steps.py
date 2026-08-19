@@ -9,6 +9,7 @@ from triagem.pipeline.steps import (
     ModelNotPromoted,
     QualityGateError,
     evaluate_incumbent,
+    export_onnx,
     ingest,
     prepare,
     promote,
@@ -102,6 +103,24 @@ def test_select_and_evaluate_resume_o_campeao(corpus_csv: Path, tmp_path: Path):
     # `metrics.json` descreve o modelo *publicado*: avaliar um candidato não pode reescrevê-lo
     # antes de a promoção ser decidida, senão o arquivo passa a mentir sobre o que está no ar.
     assert not (tmp_path / "metricas" / "metrics.json").exists()
+
+
+def test_export_onnx_converte_o_modelo_publicado(corpus_csv: Path, tmp_path: Path):
+    """A exportação parte de `model.joblib` — o artefato que está servindo, não o candidato.
+
+    Exportar antes da decisão de promoção repetiria o erro que `candidate_metrics.json`
+    resolve: um `.onnx` que não corresponde ao modelo no ar.
+    """
+    particoes = prepare(str(corpus_csv), tmp_path / "interim", seed=42)
+    train_candidates(particoes["train"], particoes["validation"], tmp_path / "candidatos", seed=42)
+    publicado = tmp_path / "candidatos" / "logistic_regression.joblib"
+
+    artefatos = export_onnx(str(publicado), tmp_path / "model.onnx", tmp_path / "model.int8.onnx")
+
+    assert Path(artefatos["onnx"]).exists()
+    assert Path(artefatos["onnx_int8"]).exists()
+    # Tipos serializáveis: o retorno trafega por XCom entre tarefas do Airflow.
+    assert all(isinstance(valor, str) for valor in artefatos.values())
 
 
 GATE_PADRAO = {"min_f1_macro": 0.53, "min_priority_recall_alta": 0.5}

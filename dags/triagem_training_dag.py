@@ -5,8 +5,8 @@ A DAG é deliberadamente fina: cada tarefa delega para uma função de
 declara aqui é a topologia — ordem, agendamento e política de retentativa — não a lógica.
 
 Encadeamento: ingestão -> preparo -> treino dos candidatos -> seleção e avaliação ->
-publicação com gate de qualidade. A avaliação do incumbente (modelo hoje em produção) roda
-em paralelo, pois só depende da ingestão, não do treino dos candidatos.
+publicação com gate de qualidade -> exportação ONNX. A avaliação do incumbente (modelo hoje
+em produção) roda em paralelo, pois só depende da ingestão, não do treino dos candidatos.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from airflow.sdk import dag, task
 from triagem.pipeline.steps import (
     ModelNotPromoted,
     evaluate_incumbent,
+    export_onnx,
     ingest,
     prepare,
     promote,
@@ -123,12 +124,28 @@ def triagem_training():
         except ModelNotPromoted as motivo:
             raise AirflowSkipException(str(motivo)) from motivo
 
+    @task
+    def exportacao(published_path: str) -> dict[str, str]:
+        """Converte o modelo recém-promovido para ONNX, com a variante INT8.
+
+        Depende de ``publicacao`` pelo valor, não só pela ordem: recebe o caminho que ela
+        devolve. Assim, quando a promoção é pulada por não haver nada a promover, o Airflow
+        pula esta tarefa junto — e o ``.onnx`` publicado continua correspondendo ao
+        ``model.joblib`` que está servindo, em vez de ser reescrito a partir de um candidato
+        que nunca entrou no ar.
+        """
+        return export_onnx(
+            published_path,
+            MODELS_DIR / "model.onnx",
+            MODELS_DIR / "model.int8.onnx",
+        )
+
     corpus = ingestao()
     particoes = preparo(corpus)
     scores = treino(particoes)
     resumo = selecao(scores, corpus)
     incumbente = avaliar_incumbente(corpus)
-    publicacao(resumo, incumbente)
+    exportacao(publicacao(resumo, incumbente))
 
 
 triagem_training()

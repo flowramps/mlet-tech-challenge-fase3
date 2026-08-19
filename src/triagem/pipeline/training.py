@@ -13,6 +13,7 @@ from triagem.config import Settings, get_settings
 from triagem.pipeline.steps import (
     ModelNotPromoted,
     evaluate_incumbent,
+    export_onnx,
     ingest,
     prepare,
     promote,
@@ -75,7 +76,10 @@ def run_pipeline(settings: Settings) -> dict[str, object]:
             "baseline": incumbente,
             "promoted": False,
             "rejection_reasons": str(motivo),
+            "onnx_path": None,
         }
+
+    artefatos = export_onnx(settings.model_path, settings.onnx_path, settings.onnx_int8_path)
 
     return {
         **resumo,
@@ -83,6 +87,7 @@ def run_pipeline(settings: Settings) -> dict[str, object]:
         "baseline": incumbente,
         "promoted": True,
         "rejection_reasons": "",
+        "onnx_path": artefatos["onnx"],
     }
 
 

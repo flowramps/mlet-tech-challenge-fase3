@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     metrics_dir: Path = PROJECT_ROOT / "metrics"
 
     model_filename: str = "model.joblib"
+    onnx_filename: str = "model.onnx"
+    onnx_int8_filename: str = "model.int8.onnx"
     model_backend: str = "sklearn"
     model_version: str = "1.0.0"
 
@@ -45,6 +47,14 @@ class Settings(BaseSettings):
     @property
     def model_path(self) -> Path:
         return self.models_dir / self.model_filename
+
+    @property
+    def onnx_path(self) -> Path:
+        return self.models_dir / self.onnx_filename
+
+    @property
+    def onnx_int8_path(self) -> Path:
+        return self.models_dir / self.onnx_int8_filename
 
 
 @lru_cache(maxsize=1)
