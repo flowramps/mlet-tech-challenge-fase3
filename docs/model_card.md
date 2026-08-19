@@ -7,7 +7,8 @@
 | Tarefa | Classificação de texto em 5 condições clínicas |
 | Arquitetura | TF-IDF (5.000 features) + Regressão Logística, scikit-learn |
 | Versão | 1.0.0 |
-| Artefato | `models/model.joblib`, 0,24 MB |
+| Artefato | `models/model.joblib` (0,24 MB) e `models/model.onnx` (0,26 MB) |
+| Backend servido | `onnx` por padrão; `sklearn` disponível por variável de ambiente |
 | Treinado por | `make train` ou DAG `triagem_training` (mesmo código) |
 
 A Regressão Logística foi selecionada contra um Random Forest de 200 árvores sobre a mesma
@@ -42,8 +43,13 @@ nenhum rótulo de prioridade foi sintetizado.
 O desempenho varia por classe: de f1 0,709 (`neoplasms`) a 0,403 (`general pathological
 conditions`). A tabela completa por classe está no README, seção "Resultados".
 
-Latência de inferência: p50 0,678 ms, p99 0,934 ms (sem HTTP); 2,35 ms / 3,29 ms de ponta
-a ponta no container.
+Latência de inferência, por backend (sem HTTP): `sklearn` p50 0,730 ms / p99 1,128 ms;
+`onnx` p50 0,109 ms / p99 0,208 ms — 6,7x mais rápido. Ponta a ponta no container, com o
+backend `onnx` que é o padrão: 1,21 ms de p50 e 1,90 ms de p99.
+
+Os dois backends servem o **mesmo modelo**: a suíte exige ≥99% de concordância de rótulos e
+confiança equivalente até `1e-5` entre eles. A troca de motor não altera a resposta, apenas o
+tempo. Detalhamento em "Otimização de inferência" no README.
 
 ## 5. Limitações e cenários de falha conhecidos
 

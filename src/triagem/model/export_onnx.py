@@ -24,6 +24,29 @@ logger = logging.getLogger(__name__)
 INPUT_NAME = "laudo"
 OPSET = 15
 
+# O `StringNormalizer` do ONNX Runtime assume `en_US.UTF-8` quando o grafo não declara um
+# locale, e falha na *inicialização da sessão* se o sistema não tiver esse locale gerado —
+# o caso de `python:3.12-slim`, a base da imagem da API. Declarar `C` torna o artefato
+# independente de pacotes de idioma do sistema operacional. É seguro pelo mesmo motivo que
+# `strip_accents=None`: o corpus é 100% ASCII, e minusculizar ASCII não depende de locale.
+NORMALIZER_LOCALE = "C"
+
+
+def _fixar_locale(modelo) -> None:
+    """Declara ``locale`` nos nós ``StringNormalizer`` do grafo já convertido.
+
+    O conversor não emite o atributo, então o valor fica a cargo do default do runtime. Isso
+    é ajustado aqui, depois da conversão, em vez de num fork do conversor: são poucos nós e
+    a alteração é local ao grafo que estamos gravando.
+    """
+    from onnx import helper
+
+    for node in modelo.graph.node:
+        if node.op_type == "StringNormalizer":
+            if any(attr.name == "locale" for attr in node.attribute):
+                continue
+            node.attribute.append(helper.make_attribute("locale", NORMALIZER_LOCALE))
+
 
 def export_pipeline(
     pipeline: Pipeline,
@@ -59,6 +82,8 @@ def export_pipeline(
         options={id(pipeline): {"zipmap": False}},
         target_opset=OPSET,
     )
+
+    _fixar_locale(modelo)
 
     metadados = {
         "triagem_labels": json.dumps(labels_by_id or {}),

@@ -69,6 +69,30 @@ def test_export_pipeline_grava_um_grafo_carregavel(pipeline, tmp_path: Path):
     assert destino.stat().st_size > 0
 
 
+def test_grafo_nao_depende_de_locale_do_sistema(pipeline, tmp_path: Path):
+    """O grafo precisa declarar `locale=C` no `StringNormalizer`.
+
+    Sem o atributo, o ONNX Runtime assume `en_US.UTF-8` e falha na inicialização em qualquer
+    imagem que não tenha esse locale gerado — `python:3.12-slim`, entre elas. O sintoma é
+    péssimo: a suíte passa na máquina de quem desenvolve e o container morre na subida.
+
+    `C` é seguro aqui pelo mesmo motivo que `strip_accents=None`: o corpus é 100% ASCII, e a
+    conversão para minúsculas em ASCII independe de locale. Verificado sobre os 2.888 laudos
+    de teste, com 100% de concordância entre os dois locales.
+    """
+    import onnx
+
+    destino = export_pipeline(pipeline, tmp_path / "model.onnx")
+    grafo = onnx.load(str(destino)).graph
+
+    normalizadores = [node for node in grafo.node if node.op_type == "StringNormalizer"]
+    assert normalizadores, "o grafo deveria conter um StringNormalizer"
+
+    for node in normalizadores:
+        locales = [attr.s.decode() for attr in node.attribute if attr.name == "locale"]
+        assert locales == ["C"], f"locale esperado 'C', encontrado {locales}"
+
+
 def test_onnx_reproduz_os_rotulos_do_sklearn(pipeline, corpus: pd.DataFrame, tmp_path: Path):
     """Paridade exigida pelo plano: ao menos 99% de concordância com o backend de origem."""
     destino = export_pipeline(pipeline, tmp_path / "model.onnx")

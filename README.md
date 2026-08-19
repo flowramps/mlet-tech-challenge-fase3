@@ -4,7 +4,7 @@ Classificação de texto clínico servida por API REST, com pipeline de treino o
 observabilidade e otimização de latência.
 
 O sistema recebe o texto livre de um laudo, prevê a categoria da condição clínica e devolve
-a prioridade de atendimento correspondente — com mediana de 2,4 ms de ponta a ponta.
+a prioridade de atendimento correspondente — com mediana de 1,2 ms de ponta a ponta.
 
 ---
 
@@ -170,8 +170,90 @@ Duas medições distintas, que não devem ser confundidas:
 A diferença de ~1,7 ms é o custo de rede, serialização e do servidor — não do modelo. Separar
 as duas é o que permite atribuir corretamente qualquer ganho de otimização futura.
 
+Este é o baseline com o backend `sklearn`, que a seção seguinte usa como referência. Com o
+backend `onnx`, hoje o padrão, o HTTP ponta a ponta no container cai para **1,21 ms** de p50
+(1,69 ms de p95): o ganho de 0,62 ms na inferência aparece quase integralmente na ponta,
+porque o custo de servidor e serialização permanece o mesmo.
+
 Ambas medidas com 20 requisições de aquecimento descartadas. Sem descartá-las, a primeira
 inferência de um processo frio (43 ms) distorceria a média em uma ordem de grandeza.
+
+## Otimização de inferência
+
+O baseline acima diz **onde** otimizar. Decompondo os 0,678 ms de uma inferência, a
+vetorização TF-IDF custa 0,664 ms e o classificador linear é ruído estatístico: o gargalo é o
+tokenizador, não o modelo. Isso descarta de saída a abordagem usual de exportar só o
+classificador para ONNX — otimizaria 2% do tempo. **O pipeline inteiro vai para o grafo.**
+
+### Resultado
+
+Medido com `make bench`, que roda os dois backends no mesmo processo e sobre a mesma amostra
+de 100 laudos do conjunto de teste — comparar execuções separadas deixaria a razão à mercê do
+estado da máquina entre elas:
+
+| Backend | p50 | p95 | p99 | Throughput | Ganho (p50) |
+|---|---|---|---|---|---|
+| `sklearn` | 0,730 ms | 1,001 ms | 1,128 ms | 1.331 req/s | — |
+| `onnx` | **0,109 ms** | **0,185 ms** | **0,208 ms** | **8.742 req/s** | **6,7x** |
+
+O artefato do comparativo fica em `metrics/latency_comparison.json`, com a razão já calculada
+para que README e apresentação não a recalculem à mão e divirjam.
+
+O ganho não vem de aritmética mais rápida: vem de a tokenização e a vetorização deixarem de
+passar pelo interpretador Python a cada laudo. É consistente com o diagnóstico do baseline —
+otimizamos os 98%, não os 2%.
+
+### Paridade: o ganho não pode custar a resposta
+
+Um backend mais rápido que responde outra coisa não é otimização, é regressão. A suíte trata
+isso como requisito, não como observação:
+
+- `test_onnx_reproduz_os_rotulos_do_sklearn` exige ≥99% de concordância de rótulos entre os
+  dois backends sobre o mesmo holdout;
+- `test_paridade_com_o_backend_sklearn` compara também a **confiança**, exigindo igualdade até
+  `1e-5` — um rótulo certo com confiança deslocada quebraria os painéis de drift.
+
+Ambas as medições passam com concordância de 100%.
+
+### Duas decisões que a exportação forçou
+
+1. **`strip_accents=None` no vetorizador.** É o único valor que o conversor ONNX suporta. A
+   troca foi medida antes de ser feita: os 11.550 laudos de treino são 100% ASCII, então a
+   normalização não altera uma única feature e o f1-macro fica idêntico até a sexta casa
+   (0,581178 nos dois casos). Um corpus acentuado exigiria rever isso.
+2. **`locale=C` no `StringNormalizer` do grafo.** Sem o atributo, o ONNX Runtime assume
+   `en_US.UTF-8` e **falha ao inicializar a sessão** em qualquer imagem sem esse locale
+   gerado — `python:3.12-slim` entre elas. O sintoma seria o pior possível: suíte verde na
+   máquina de quem desenvolve, container morrendo na subida. Declarar o locale no artefato o
+   torna independente de pacotes de idioma do sistema. Coberto por
+   `test_grafo_nao_depende_de_locale_do_sistema`.
+
+### Quantização INT8: o que não funcionou
+
+A quantização dinâmica foi aplicada e **não rendeu nada** — o artefato saiu com exatamente
+100% do tamanho original (0,263 MB). O motivo é estrutural, não um erro de configuração:
+`quantize_dynamic` age sobre `MatMul`, `Gemm` e `Conv`, e o conversor traduz a regressão
+logística para `LinearClassifier`, um operador do domínio `ai.onnx.ml` que a quantização não
+reconhece. O grafo sai com o conjunto de nós inalterado.
+
+O resultado negativo está registrado como asserção em
+`test_quantizacao_nao_altera_o_grafo_de_um_classificador_linear`, e não apenas como um
+parágrafo aqui: se uma versão futura do `onnxruntime` passar a cobrir esse operador, o teste
+quebra e obriga a remedir o que está publicado, em vez de deixar esta seção envelhecer em
+silêncio. `make export-onnx` gera as duas variantes para quem quiser reproduzir a comparação.
+
+### Alternar backend
+
+O serviço usa `onnx` por padrão desde esta etapa. A imagem carrega os dois artefatos (menos de
+0,6 MB somados), então trocar o motor é uma variável de ambiente, sem rebuild:
+
+```bash
+TRIAGEM_MODEL_BACKEND=sklearn docker compose up -d
+```
+
+Isso não é conveniência: é o que permite comparar os backends **no Grafana, medindo o serviço
+real**, pelo painel "Inferência do modelo por backend" — em vez de confiar apenas na tabela
+acima. E é o caminho de volta imediato caso o backend otimizado apresente problema.
 
 ## Automação
 
@@ -356,6 +438,12 @@ de configuração manual. O JSON do dashboard é versionado em
 | Predições por condição | O que o modelo está prevendo? Uma classe engoliu as outras? |
 | Confiança das predições (p50/p90) | O modelo continua tão certo quanto antes? |
 
+![Dashboard do Grafana com tráfego real](docs/images/grafana-dashboard.png)
+
+Captura da stack local sob o tráfego de `make traffic`: 1.767 requisições, 9,9% de erro (as
+respostas 422 que o gerador provoca de propósito, para o painel de erro ter o que exibir) e a
+inferência do backend `onnx` em torno de 250 µs no p95.
+
 Que valor em cada painel conta como alerta, e o que fazer quando disparar, está no
 [plano de monitoramento](docs/monitoring_plan.md) — os limiares vêm do comportamento real do
 campeão no teste, não são chutados.
@@ -373,14 +461,15 @@ Na primeira execução, nesta ordem:
 ```bash
 make install     # dependências e hooks de pre-commit
 make data        # baixa o corpus público (~17 MB, idempotente)
-make train       # treina os dois candidatos e promove o campeão
+make train       # treina, promove o campeão e exporta os artefatos ONNX
 ```
 
 Com o modelo treinado, os demais alvos ficam disponíveis:
 
 ```bash
-make evaluate    # avalia no conjunto de teste -> metrics/metrics.json
-make bench       # mede a latência de inferência
+make evaluate    # avalia o modelo publicado -> metrics/metrics.json
+make export-onnx # reexporta os artefatos ONNX sem retreinar
+make bench       # compara a latência dos backends -> metrics/latency_comparison.json
 make help        # lista todos os alvos
 ```
 
@@ -493,10 +582,12 @@ src/triagem/
 │   └── prepare.py              validação de schema e split estratificado
 ├── model/
 │   ├── train.py                candidatos, treino e seleção do campeão
-│   └── evaluate.py             métricas e matriz de confusão
+│   ├── evaluate.py             métricas e matriz de confusão
+│   └── export_onnx.py          conversão para ONNX e quantização INT8
 ├── inference/
 │   ├── base.py                 Protocol Classifier + Prediction
 │   ├── sklearn_backend.py      motor de inferência scikit-learn
+│   ├── onnx_backend.py         motor de inferência ONNX Runtime
 │   ├── factory.py              escolha do backend por configuração
 │   └── priority.py             regra de negócio condição -> prioridade
 ├── api/
@@ -507,7 +598,7 @@ src/triagem/
 │   ├── steps.py                etapas do treino, encadeáveis e serializáveis
 │   └── training.py             execução local do pipeline completo
 └── bench/
-    └── latency.py              medição de latência com percentis
+    └── latency.py              medição e comparação de latência entre backends
 
 dags/
 └── triagem_training_dag.py     topologia da DAG de treino no Airflow
@@ -518,6 +609,7 @@ docker/
 └── grafana/                    fonte de dados e dashboard provisionados por arquivo
 
 docs/
+├── images/                     capturas da stack em execução
 ├── ml_canvas.md                arquitetura de decisão do projeto, nos 10 blocos de Dorard
 ├── model_card.md               uso pretendido, limitações e riscos do modelo servido
 └── monitoring_plan.md          o que cada métrica significa, limiar de alerta e playbook
@@ -532,4 +624,4 @@ comparação entre backends uma medição do sistema real em vez de um script pa
 - [x] **Etapa 1** — Modelo, API FastAPI, container e baseline de latência
 - [x] **Etapa 2** — CI/CD no GitHub Actions e DAG de treino no Airflow
 - [x] **Etapa 3** — Métricas Prometheus e dashboard Grafana
-- [ ] **Etapa 4** — Exportação ONNX, quantização e comparativo de latência
+- [x] **Etapa 4** — Exportação ONNX, quantização e comparativo de latência
