@@ -25,7 +25,14 @@ class Settings(BaseSettings):
     metrics_dir: Path = PROJECT_ROOT / "metrics"
 
     model_filename: str = "model.joblib"
-    model_backend: str = "sklearn"
+    onnx_filename: str = "model.onnx"
+    onnx_int8_filename: str = "model.int8.onnx"
+
+    # Padrão `onnx` desde a Etapa 4: é o backend mais rápido (6,7x no p50) e a suíte exige
+    # paridade de rótulos com o scikit-learn, então a troca não muda a resposta. `sklearn`
+    # segue disponível e a imagem carrega os dois artefatos — alternar em tempo de execução
+    # é o que permite comparar os backends no Grafana, medindo o serviço real.
+    model_backend: str = "onnx"
     model_version: str = "1.0.0"
 
     # Piso de qualidade para promover um modelo recém-treinado. Calibrado em 0,53 a partir
@@ -45,6 +52,14 @@ class Settings(BaseSettings):
     @property
     def model_path(self) -> Path:
         return self.models_dir / self.model_filename
+
+    @property
+    def onnx_path(self) -> Path:
+        return self.models_dir / self.onnx_filename
+
+    @property
+    def onnx_int8_path(self) -> Path:
+        return self.models_dir / self.onnx_int8_filename
 
 
 @lru_cache(maxsize=1)

@@ -75,17 +75,36 @@ def test_run_pipeline_encadeia_as_etapas_e_promove_o_bootstrap(tmp_path: Path, f
     assert Path(resumo["published_path"]) == settings.model_path
     assert settings.model_path.exists()
     assert (settings.metrics_dir / "training_history.jsonl").exists()
+    # A exportação ONNX fecha o pipeline: promover o modelo e publicar o grafo otimizado
+    # correspondente é a mesma entrega — servir `onnx` nunca deve significar servir outro modelo.
+    assert settings.onnx_path.exists()
+    assert settings.onnx_int8_path.exists()
 
 
-def test_run_pipeline_recusa_retreino_identico_ao_incumbente(tmp_path: Path, fake_corpus):
-    """Rodar o pipeline duas vezes com o mesmo dado e seed não promove a segunda vez — e o
-    run precisa falhar de verdade (não engolir o erro), do jeito que `make train` falharia."""
+def test_run_pipeline_nao_promove_retreino_identico_mas_conclui_sem_erro(
+    tmp_path: Path, fake_corpus
+):
+    """Rodar o pipeline duas vezes com o mesmo dado e seed não promove a segunda vez — e isso
+    é um desfecho normal, não um erro.
+
+    Sobre um corpus estático toda execução periódica cai aqui: o retreino reproduz o
+    incumbente. Se isso levantasse exceção, a DAG semanal ficaria vermelha para sempre e o
+    sinal de falha deixaria de significar alguma coisa.
+    """
     settings = _settings(tmp_path)
 
-    run_pipeline(settings)  # primeira vez: bootstrap, promove
+    primeiro = run_pipeline(settings)
+    assert primeiro["promoted"] is True
 
-    with pytest.raises(QualityGateError):
-        run_pipeline(settings)  # segunda vez: candidato idêntico ao incumbente
+    segundo = run_pipeline(settings)  # candidato idêntico ao incumbente
+
+    assert segundo["promoted"] is False
+    assert segundo["published_path"] is None
+    assert segundo["rejection_reasons"]
+    assert settings.model_path.exists()  # o modelo anterior segue publicado
+
+    # Nada promovido, nada reexportado: o .onnx continua correspondendo ao modelo no ar.
+    assert segundo["onnx_path"] is None
 
     linhas = (
         (settings.metrics_dir / "training_history.jsonl")
@@ -93,4 +112,14 @@ def test_run_pipeline_recusa_retreino_identico_ao_incumbente(tmp_path: Path, fak
         .strip()
         .splitlines()
     )
-    assert len(linhas) == 2  # as duas execuções ficam registradas, mesmo a reprovada
+    assert len(linhas) == 2  # as duas execuções ficam registradas, promovida ou não
+
+
+def test_run_pipeline_falha_quando_o_candidato_fica_abaixo_do_piso(tmp_path: Path, fake_corpus):
+    """Violar um piso absoluto continua derrubando o run: aí sim algo está errado no treino."""
+    settings = _settings(tmp_path).model_copy(update={"min_f1_macro": 1.1})
+
+    with pytest.raises(QualityGateError):
+        run_pipeline(settings)
+
+    assert not settings.model_path.exists()

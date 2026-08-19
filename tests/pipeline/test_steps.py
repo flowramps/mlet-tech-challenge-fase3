@@ -6,8 +6,10 @@ import pytest
 
 from triagem.data.prepare import LABEL_COLUMN, TEXT_COLUMN
 from triagem.pipeline.steps import (
+    ModelNotPromoted,
     QualityGateError,
     evaluate_incumbent,
+    export_onnx,
     ingest,
     prepare,
     promote,
@@ -96,8 +98,29 @@ def test_select_and_evaluate_resume_o_campeao(corpus_csv: Path, tmp_path: Path):
     assert 0.0 <= resumo["f1_macro"] <= 1.0
     assert 0.0 <= resumo["priority_recall_alta"] <= 1.0
     assert Path(resumo["candidate_path"]).exists()
-    assert (tmp_path / "metricas" / "metrics.json").exists()
+    assert (tmp_path / "metricas" / "candidate_metrics.json").exists()
     assert (tmp_path / "metricas" / "model_selection.json").exists()
+    # `metrics.json` descreve o modelo *publicado*: avaliar um candidato não pode reescrevê-lo
+    # antes de a promoção ser decidida, senão o arquivo passa a mentir sobre o que está no ar.
+    assert not (tmp_path / "metricas" / "metrics.json").exists()
+
+
+def test_export_onnx_converte_o_modelo_publicado(corpus_csv: Path, tmp_path: Path):
+    """A exportação parte de `model.joblib` — o artefato que está servindo, não o candidato.
+
+    Exportar antes da decisão de promoção repetiria o erro que `candidate_metrics.json`
+    resolve: um `.onnx` que não corresponde ao modelo no ar.
+    """
+    particoes = prepare(str(corpus_csv), tmp_path / "interim", seed=42)
+    train_candidates(particoes["train"], particoes["validation"], tmp_path / "candidatos", seed=42)
+    publicado = tmp_path / "candidatos" / "logistic_regression.joblib"
+
+    artefatos = export_onnx(str(publicado), tmp_path / "model.onnx", tmp_path / "model.int8.onnx")
+
+    assert Path(artefatos["onnx"]).exists()
+    assert Path(artefatos["onnx_int8"]).exists()
+    # Tipos serializáveis: o retorno trafega por XCom entre tarefas do Airflow.
+    assert all(isinstance(valor, str) for valor in artefatos.values())
 
 
 GATE_PADRAO = {"min_f1_macro": 0.53, "min_priority_recall_alta": 0.5}
@@ -203,15 +226,20 @@ def test_publish_falha_quando_recall_de_prioridade_alta_fica_abaixo_do_piso(tmp_
     assert not destino.exists()
 
 
-def test_publish_falha_quando_nao_supera_o_incumbente(tmp_path: Path):
-    """Acima do piso não basta: um retreino pior que a produção não pode promover."""
+def test_publish_sinaliza_nao_promocao_quando_nao_supera_o_incumbente(tmp_path: Path):
+    """Não superar a produção é 'nada a promover', não 'pipeline quebrado'.
+
+    O candidato passou nos dois pisos absolutos — ele é um modelo utilizável, só não é
+    melhor que o que já está no ar. Sinalizar isso como falha faria a DAG semanal sobre um
+    corpus estático ficar vermelha para sempre, já que o retreino reproduz o incumbente.
+    """
     destino = tmp_path / "model.joblib"
     destino.write_bytes(b"modelo bom em producao")
 
     candidato = tmp_path / "candidato.joblib"
     candidato.write_bytes(b"modelo um pouco pior")
 
-    with pytest.raises(QualityGateError, match="produção"):
+    with pytest.raises(ModelNotPromoted, match="produção"):
         publish(
             str(candidato),
             destino,
@@ -225,7 +253,7 @@ def test_publish_falha_quando_nao_supera_o_incumbente(tmp_path: Path):
     assert destino.read_bytes() == b"modelo bom em producao"
 
 
-def test_publish_falha_quando_recall_de_prioridade_alta_regride(tmp_path: Path):
+def test_publish_sinaliza_nao_promocao_quando_recall_de_prioridade_alta_regride(tmp_path: Path):
     """f1-macro melhor não salva um candidato que piora a segurança da fila de triagem."""
     destino = tmp_path / "model.joblib"
     destino.write_bytes(b"modelo bom em producao")
@@ -233,12 +261,48 @@ def test_publish_falha_quando_recall_de_prioridade_alta_regride(tmp_path: Path):
     candidato = tmp_path / "candidato.joblib"
     candidato.write_bytes(b"modelo com f1 melhor mas recall de alta pior")
 
-    with pytest.raises(QualityGateError, match="prioridade alta"):
+    with pytest.raises(ModelNotPromoted, match="prioridade alta"):
         publish(
             str(candidato),
             destino,
             f1_macro=0.65,
             priority_recall_alta=0.70,
+            baseline_f1_macro=0.60,
+            baseline_priority_recall_alta=0.80,
+            **GATE_PADRAO,
+        )
+
+    assert destino.read_bytes() == b"modelo bom em producao"
+
+
+def test_nao_promocao_nao_e_confundida_com_reprovacao_de_qualidade(tmp_path: Path):
+    """As duas condições precisam ser distinguíveis por tipo, não só pela mensagem.
+
+    A DAG converte uma em `skip` e deixa a outra falhar o run — se `ModelNotPromoted` fosse
+    subclasse de `QualityGateError`, um `except QualityGateError` engoliria as duas.
+    """
+    assert not issubclass(ModelNotPromoted, QualityGateError)
+    assert not issubclass(QualityGateError, ModelNotPromoted)
+
+
+def test_publish_prioriza_o_piso_absoluto_sobre_a_nao_promocao(tmp_path: Path):
+    """Candidato ruim E pior que a produção é falha de qualidade, não mero 'não promover'.
+
+    A condição mais severa manda: um modelo abaixo do piso indica que algo quebrou no treino
+    e alguém precisa olhar, então o run tem que falhar de verdade.
+    """
+    destino = tmp_path / "model.joblib"
+    destino.write_bytes(b"modelo bom em producao")
+
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"modelo quebrado")
+
+    with pytest.raises(QualityGateError):
+        publish(
+            str(candidato),
+            destino,
+            f1_macro=0.10,
+            priority_recall_alta=0.10,
             baseline_f1_macro=0.60,
             baseline_priority_recall_alta=0.80,
             **GATE_PADRAO,
@@ -317,6 +381,90 @@ def test_promote_registra_reprovacao_e_ainda_levanta(tmp_path: Path):
     assert entrada["promoted"] is False
     assert entrada["rejection_reasons"]
     assert not destino.exists()
+
+
+def test_promote_publica_as_metricas_junto_com_o_modelo(tmp_path: Path):
+    """Promover o artefato e promover as métricas dele é a mesma operação.
+
+    `metrics.json` é a resposta a "quanto vale o modelo que está atendendo?" — se ele fosse
+    escrito na avaliação do candidato, um run que não promove deixaria o arquivo descrevendo
+    um modelo que nunca entrou no ar.
+    """
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"modelo")
+    metrics_dir = tmp_path / "metricas"
+    metrics_dir.mkdir()
+    (metrics_dir / "candidate_metrics.json").write_text(
+        json.dumps({"f1_macro": 0.60, "priority_recall_alta": 0.80}), encoding="utf-8"
+    )
+
+    promote(
+        _resumo(0.60, 0.80, candidato),
+        None,
+        tmp_path / "publicado" / "model.joblib",
+        metrics_dir,
+        **GATE_PADRAO,
+    )
+
+    publicadas = json.loads((metrics_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert publicadas["f1_macro"] == 0.60
+
+
+def test_promote_nao_toca_nas_metricas_publicadas_quando_nao_promove(tmp_path: Path):
+    """Run que não promove deixa `metrics.json` como estava — ele descreve o que segue no ar."""
+    destino = tmp_path / "model.joblib"
+    destino.write_bytes(b"modelo em producao")
+
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"candidato identico")
+
+    metrics_dir = tmp_path / "metricas"
+    metrics_dir.mkdir()
+    (metrics_dir / "metrics.json").write_text(
+        json.dumps({"f1_macro": 0.60, "origem": "modelo em producao"}), encoding="utf-8"
+    )
+    (metrics_dir / "candidate_metrics.json").write_text(
+        json.dumps({"f1_macro": 0.60, "origem": "candidato"}), encoding="utf-8"
+    )
+
+    with pytest.raises(ModelNotPromoted):
+        promote(
+            _resumo(0.60, 0.80, candidato),
+            {"f1_macro": 0.60, "priority_recall_alta": 0.80},
+            destino,
+            metrics_dir,
+            **GATE_PADRAO,
+        )
+
+    publicadas = json.loads((metrics_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert publicadas["origem"] == "modelo em producao"
+
+
+def test_promote_registra_no_historico_quando_apenas_nao_promove(tmp_path: Path):
+    """Um run que não promove por empate ainda precisa deixar rastro, com o motivo."""
+    destino = tmp_path / "model.joblib"
+    destino.write_bytes(b"modelo em producao")
+
+    candidato = tmp_path / "candidato.joblib"
+    candidato.write_bytes(b"candidato identico ao incumbente")
+
+    incumbente = {"f1_macro": 0.60, "priority_recall_alta": 0.80}
+
+    with pytest.raises(ModelNotPromoted):
+        promote(
+            _resumo(0.60, 0.80, candidato),
+            incumbente,
+            destino,
+            tmp_path / "metricas",
+            **GATE_PADRAO,
+        )
+
+    entrada = json.loads(
+        (tmp_path / "metricas" / "training_history.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert entrada["promoted"] is False
+    assert entrada["rejection_reasons"]
+    assert destino.read_bytes() == b"modelo em producao"
 
 
 def test_promote_acumula_execucoes_sem_sobrescrever(tmp_path: Path):

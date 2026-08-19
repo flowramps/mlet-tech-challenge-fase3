@@ -34,7 +34,13 @@ RUN useradd --create-home --uid 1000 triagem
 
 COPY --from=builder /app/.venv /app/.venv
 COPY src ./src
+
+# Os dois artefatos entram na imagem, somando menos de 0,6 MB. Não é redundância: com ambos
+# presentes, `TRIAGEM_MODEL_BACKEND` alterna o motor de inferência sem reconstruir a imagem,
+# que é o que permite comparar os backends no Grafana medindo o serviço de verdade — e o que
+# dá um caminho de volta imediato se o backend otimizado apresentar problema.
 COPY models/model.joblib ./models/model.joblib
+COPY models/model.onnx ./models/model.onnx
 
 RUN chown -R triagem:triagem /app
 USER triagem

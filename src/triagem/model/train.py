@@ -45,13 +45,24 @@ MODEL_TYPES: tuple[str, ...] = ("random_forest", "logistic_regression")
 
 
 def _build_vectorizer() -> TfidfVectorizer:
-    """Vetorização compartilhada pelos candidatos."""
+    """Vetorização compartilhada pelos candidatos.
+
+    ``strip_accents`` fica em ``None`` porque o conversor ONNX do ``TfidfVectorizer`` só
+    suporta esse valor, e exportar o vetorizador é o que dá ganho de latência de verdade —
+    ele responde por 98% do tempo de inferência (ver "Otimização" no README).
+
+    A troca é gratuita **neste corpus**, não por princípio: os 11.550 laudos de treino são
+    100% ASCII, então remover a normalização não altera uma única feature — o f1-macro de
+    teste é idêntico até a sexta casa decimal (0,581178 nos dois casos). Um corpus com
+    acentuação exigiria reavaliar: ou normalizar antes da vetorização, ou aceitar a
+    divergência entre os backends.
+    """
     return TfidfVectorizer(
         max_features=MAX_FEATURES,
         ngram_range=NGRAM_RANGE,
         min_df=MIN_DF,
         sublinear_tf=True,
-        strip_accents="unicode",
+        strip_accents=None,
         lowercase=True,
     )
 

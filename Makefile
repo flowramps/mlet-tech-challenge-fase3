@@ -1,4 +1,4 @@
-.PHONY: help install lint format test data train evaluate bench api docker-build docker-run \
+.PHONY: help install lint format test data train evaluate export-onnx bench api docker-build docker-run \
 	airflow-up airflow-down airflow-test monitoring-up monitoring-down traffic clean
 
 help:             ## Lista os alvos disponíveis
@@ -29,7 +29,10 @@ train:            ## Treina os candidatos, avalia e promove o campeão
 evaluate:         ## Avalia o modelo e grava metrics/
 	poetry run python -m triagem.model.evaluate
 
-bench:            ## Mede a latência de inferência
+export-onnx:      ## Reexporta o modelo publicado para ONNX + INT8 (sem retreinar)
+	poetry run python -m triagem.model.export_onnx
+
+bench:            ## Compara a latência de todos os backends na mesma rodada
 	poetry run python -m triagem.bench.latency
 
 api:              ## Sobe a API local com reload

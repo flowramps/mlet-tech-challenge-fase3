@@ -4,7 +4,7 @@ Classificação de texto clínico servida por API REST, com pipeline de treino o
 observabilidade e otimização de latência.
 
 O sistema recebe o texto livre de um laudo, prevê a categoria da condição clínica e devolve
-a prioridade de atendimento correspondente — com mediana de 2,4 ms de ponta a ponta.
+a prioridade de atendimento correspondente — com mediana de 1,2 ms de ponta a ponta.
 
 ---
 
@@ -170,8 +170,90 @@ Duas medições distintas, que não devem ser confundidas:
 A diferença de ~1,7 ms é o custo de rede, serialização e do servidor — não do modelo. Separar
 as duas é o que permite atribuir corretamente qualquer ganho de otimização futura.
 
+Este é o baseline com o backend `sklearn`, que a seção seguinte usa como referência. Com o
+backend `onnx`, hoje o padrão, o HTTP ponta a ponta no container cai para **1,21 ms** de p50
+(1,69 ms de p95): o ganho de 0,62 ms na inferência aparece quase integralmente na ponta,
+porque o custo de servidor e serialização permanece o mesmo.
+
 Ambas medidas com 20 requisições de aquecimento descartadas. Sem descartá-las, a primeira
 inferência de um processo frio (43 ms) distorceria a média em uma ordem de grandeza.
+
+## Otimização de inferência
+
+O baseline acima diz **onde** otimizar. Decompondo os 0,678 ms de uma inferência, a
+vetorização TF-IDF custa 0,664 ms e o classificador linear é ruído estatístico: o gargalo é o
+tokenizador, não o modelo. Isso descarta de saída a abordagem usual de exportar só o
+classificador para ONNX — otimizaria 2% do tempo. **O pipeline inteiro vai para o grafo.**
+
+### Resultado
+
+Medido com `make bench`, que roda os dois backends no mesmo processo e sobre a mesma amostra
+de 100 laudos do conjunto de teste — comparar execuções separadas deixaria a razão à mercê do
+estado da máquina entre elas:
+
+| Backend | p50 | p95 | p99 | Throughput | Ganho (p50) |
+|---|---|---|---|---|---|
+| `sklearn` | 0,730 ms | 1,001 ms | 1,128 ms | 1.331 req/s | — |
+| `onnx` | **0,109 ms** | **0,185 ms** | **0,208 ms** | **8.742 req/s** | **6,7x** |
+
+O artefato do comparativo fica em `metrics/latency_comparison.json`, com a razão já calculada
+para que README e apresentação não a recalculem à mão e divirjam.
+
+O ganho não vem de aritmética mais rápida: vem de a tokenização e a vetorização deixarem de
+passar pelo interpretador Python a cada laudo. É consistente com o diagnóstico do baseline —
+otimizamos os 98%, não os 2%.
+
+### Paridade: o ganho não pode custar a resposta
+
+Um backend mais rápido que responde outra coisa não é otimização, é regressão. A suíte trata
+isso como requisito, não como observação:
+
+- `test_onnx_reproduz_os_rotulos_do_sklearn` exige ≥99% de concordância de rótulos entre os
+  dois backends sobre o mesmo holdout;
+- `test_paridade_com_o_backend_sklearn` compara também a **confiança**, exigindo igualdade até
+  `1e-5` — um rótulo certo com confiança deslocada quebraria os painéis de drift.
+
+Ambas as medições passam com concordância de 100%.
+
+### Duas decisões que a exportação forçou
+
+1. **`strip_accents=None` no vetorizador.** É o único valor que o conversor ONNX suporta. A
+   troca foi medida antes de ser feita: os 11.550 laudos de treino são 100% ASCII, então a
+   normalização não altera uma única feature e o f1-macro fica idêntico até a sexta casa
+   (0,581178 nos dois casos). Um corpus acentuado exigiria rever isso.
+2. **`locale=C` no `StringNormalizer` do grafo.** Sem o atributo, o ONNX Runtime assume
+   `en_US.UTF-8` e **falha ao inicializar a sessão** em qualquer imagem sem esse locale
+   gerado — `python:3.12-slim` entre elas. O sintoma seria o pior possível: suíte verde na
+   máquina de quem desenvolve, container morrendo na subida. Declarar o locale no artefato o
+   torna independente de pacotes de idioma do sistema. Coberto por
+   `test_grafo_nao_depende_de_locale_do_sistema`.
+
+### Quantização INT8: o que não funcionou
+
+A quantização dinâmica foi aplicada e **não rendeu nada** — o artefato saiu com exatamente
+100% do tamanho original (0,263 MB). O motivo é estrutural, não um erro de configuração:
+`quantize_dynamic` age sobre `MatMul`, `Gemm` e `Conv`, e o conversor traduz a regressão
+logística para `LinearClassifier`, um operador do domínio `ai.onnx.ml` que a quantização não
+reconhece. O grafo sai com o conjunto de nós inalterado.
+
+O resultado negativo está registrado como asserção em
+`test_quantizacao_nao_altera_o_grafo_de_um_classificador_linear`, e não apenas como um
+parágrafo aqui: se uma versão futura do `onnxruntime` passar a cobrir esse operador, o teste
+quebra e obriga a remedir o que está publicado, em vez de deixar esta seção envelhecer em
+silêncio. `make export-onnx` gera as duas variantes para quem quiser reproduzir a comparação.
+
+### Alternar backend
+
+O serviço usa `onnx` por padrão desde esta etapa. A imagem carrega os dois artefatos (menos de
+0,6 MB somados), então trocar o motor é uma variável de ambiente, sem rebuild:
+
+```bash
+TRIAGEM_MODEL_BACKEND=sklearn docker compose up -d
+```
+
+Isso não é conveniência: é o que permite comparar os backends **no Grafana, medindo o serviço
+real**, pelo painel "Inferência do modelo por backend" — em vez de confiar apenas na tabela
+acima. E é o caminho de volta imediato caso o backend otimizado apresente problema.
 
 ## Automação
 
@@ -197,14 +279,14 @@ nuvem sem provisionar recursos, então o gatilho automático está desligado de 
 
 ### Pipeline de treino
 
-A DAG `triagem_training` encadeia seis tarefas. `avaliar_incumbente` só depende do corpus, não
+A DAG `triagem_training` encadeia sete tarefas. `avaliar_incumbente` só depende do corpus, não
 do treino dos candidatos, então roda em paralelo com `preparo`/`treino`/`selecao` em vez de
 esperá-los:
 
 ```
 ingestao --+--> preparo --> treino --> selecao --+
            |                                      |
-           +--> avaliar_incumbente ---------------+--> publicacao
+           +--> avaliar_incumbente ---------------+--> publicacao --> exportacao
 ```
 
 | Tarefa | Responsabilidade |
@@ -215,6 +297,7 @@ ingestao --+--> preparo --> treino --> selecao --+
 | `selecao` | Escolhe o campeão e mede o desempenho (f1-macro, recall de prioridade alta) no teste |
 | `avaliar_incumbente` | Mede o mesmo desempenho do modelo *hoje em produção*, do zero, no mesmo teste |
 | `publicacao` | Decide a promoção pelo gate de 4 critérios e registra o resultado no histórico |
+| `exportacao` | Converte o modelo recém-promovido para ONNX, com a variante INT8 |
 
 A DAG é um invólucro fino: cada tarefa delega para uma função de
 `src/triagem/pipeline/steps.py`, testada isoladamente na suíte. O que a DAG declara é a
@@ -255,23 +338,47 @@ absolutos e dois de não regressão contra o incumbente (`_gate_failures`/`shoul
 Critérios 3 e 4 só se aplicam quando já existe um modelo publicado; sem incumbente (primeiro
 treino), só os pisos absolutos (1 e 2) valem.
 
-Reprovando em qualquer um dos quatro, a tarefa falha e **o artefato publicado não é tocado** —
-o modelo que já está atendendo continua no ar. Um retreino ruim, ou simplesmente não melhor —
-tecnicamente ou na métrica de negócio —, não derruba produção. O comportamento é coberto por
-teste (`test_publish_preserva_o_modelo_anterior_ao_reprovar`,
-`test_publish_falha_quando_nao_supera_o_incumbente`,
-`test_publish_falha_quando_recall_de_prioridade_alta_regride`) e foi verificado na prática: um
-segundo `make train` sobre o mesmo dado e seed treina um candidato idêntico ao incumbente e é
-corretamente recusado (`f1_macro 0.5802 não supera o modelo em produção (0.5802)`).
+Em qualquer desfecho negativo **o artefato publicado não é tocado** — o modelo que já está
+atendendo continua no ar. O que muda é a gravidade do sinal, e a distinção é o ponto:
+
+| Desfecho | O que significa | Exceção | Airflow |
+|---|---|---|---|
+| Violou um piso (1 ou 2) | Candidato inutilizável, algo quebrou no treino | `QualityGateError` | run **falha** |
+| Só não superou o incumbente (3 ou 4) | Candidato bom, apenas não melhor | `ModelNotPromoted` | tarefa **skip** |
+
+Tratar os dois casos como falha seria cômodo e errado. O corpus é estático e as sementes são
+fixas, então **todo retreino reproduz o incumbente**: um segundo `make train` treina um
+candidato idêntico ao que está publicado (`f1_macro 0.5812 não supera o modelo em produção
+(0.5812)`). Se isso derrubasse o run, a DAG semanal ficaria vermelha para sempre e o alarme
+deixaria de significar alguma coisa — o operador aprenderia a ignorá-lo, que é justamente
+como incidentes reais passam despercebidos. Por isso `ModelNotPromoted` não é subclasse de
+`QualityGateError`: um `except QualityGateError` engoliria as duas.
+
+Coberto por teste em `tests/pipeline/`:
+`test_publish_prioriza_o_piso_absoluto_sobre_a_nao_promocao` (piso tem precedência),
+`test_nao_promocao_nao_e_confundida_com_reprovacao_de_qualidade` (os tipos são distintos) e
+`test_run_pipeline_nao_promove_retreino_identico_mas_conclui_sem_erro` (o pipeline local roda
+duas vezes seguidas e conclui, sem promover na segunda).
 
 ### Histórico de execuções
 
 Cada chamada à tarefa `publicacao` (via `promote()`) acrescenta uma linha a
 `metrics/training_history.jsonl` — promovido ou não, com os quatro números do gate e, se
 reprovado, o motivo. Um arquivo por linha (JSON Lines), nunca reescrito: dá para comparar
-retreinos ao longo do tempo, e nenhum run reprovado fica sem rastro. `metrics/metrics.json` e
-`metrics/model_selection.json`, em contraste, guardam só o *último* run — o histórico existe
-justamente para o que esses dois arquivos não cobrem.
+retreinos ao longo do tempo, e nenhum run reprovado fica sem rastro.
+
+O diretório `metrics/` separa o que é **candidato** do que está **publicado** — a distinção
+importa justamente porque nem todo run promove:
+
+| Arquivo | Descreve | Escrito por |
+|---|---|---|
+| `candidate_metrics.json` | O candidato recém-avaliado, tenha ele sido promovido ou não | `select_and_evaluate()` |
+| `metrics.json` | O modelo que está **atendendo agora** | `promote()`, só quando promove |
+| `model_selection.json` | Qual candidato venceu a disputa e com que score | `select_and_evaluate()` |
+| `training_history.jsonl` | Todas as execuções, append-only | `promote()`, sempre |
+
+Sem essa separação, um retreino recusado deixaria `metrics.json` descrevendo um modelo que
+nunca entrou no ar — e é dele que saem os números do [Model Card](docs/model_card.md).
 
 ## Observabilidade
 
@@ -332,6 +439,12 @@ de configuração manual. O JSON do dashboard é versionado em
 | Predições por condição | O que o modelo está prevendo? Uma classe engoliu as outras? |
 | Confiança das predições (p50/p90) | O modelo continua tão certo quanto antes? |
 
+![Dashboard do Grafana com tráfego real](docs/images/grafana-dashboard.png)
+
+Captura da stack local sob o tráfego de `make traffic`: 1.767 requisições, 9,9% de erro (as
+respostas 422 que o gerador provoca de propósito, para o painel de erro ter o que exibir) e a
+inferência do backend `onnx` em torno de 250 µs no p95.
+
 Que valor em cada painel conta como alerta, e o que fazer quando disparar, está no
 [plano de monitoramento](docs/monitoring_plan.md) — os limiares vêm do comportamento real do
 campeão no teste, não são chutados.
@@ -349,14 +462,15 @@ Na primeira execução, nesta ordem:
 ```bash
 make install     # dependências e hooks de pre-commit
 make data        # baixa o corpus público (~17 MB, idempotente)
-make train       # treina os dois candidatos e promove o campeão
+make train       # treina, promove o campeão e exporta os artefatos ONNX
 ```
 
 Com o modelo treinado, os demais alvos ficam disponíveis:
 
 ```bash
-make evaluate    # avalia no conjunto de teste -> metrics/metrics.json
-make bench       # mede a latência de inferência
+make evaluate    # avalia o modelo publicado -> metrics/metrics.json
+make export-onnx # reexporta os artefatos ONNX sem retreinar
+make bench       # compara a latência dos backends -> metrics/latency_comparison.json
 make help        # lista todos os alvos
 ```
 
@@ -393,7 +507,7 @@ make airflow-test    # executa a DAG de ponta a ponta (~40s)
 make airflow-down
 ```
 
-O Airflow sobe em **um único container** (`LocalExecutor` com SQLite): uma DAG de seis
+O Airflow sobe em **um único container** (`LocalExecutor` com SQLite): uma DAG de sete
 tarefas não justifica um container de banco só para a demonstração.
 
 Ele tem compose próprio, separado da stack de observabilidade, e a razão é prática: quem
@@ -440,8 +554,8 @@ curl -X POST localhost:8000/predict \
   "priority": "alta",
   "priority_source": "regra_de_negocio",
   "model_version": "1.0.0",
-  "backend": "sklearn",
-  "inference_ms": 1.04
+  "backend": "onnx",
+  "inference_ms": 0.086
 }
 ```
 
@@ -469,10 +583,12 @@ src/triagem/
 │   └── prepare.py              validação de schema e split estratificado
 ├── model/
 │   ├── train.py                candidatos, treino e seleção do campeão
-│   └── evaluate.py             métricas e matriz de confusão
+│   ├── evaluate.py             métricas e matriz de confusão
+│   └── export_onnx.py          conversão para ONNX e quantização INT8
 ├── inference/
 │   ├── base.py                 Protocol Classifier + Prediction
 │   ├── sklearn_backend.py      motor de inferência scikit-learn
+│   ├── onnx_backend.py         motor de inferência ONNX Runtime
 │   ├── factory.py              escolha do backend por configuração
 │   └── priority.py             regra de negócio condição -> prioridade
 ├── api/
@@ -483,7 +599,7 @@ src/triagem/
 │   ├── steps.py                etapas do treino, encadeáveis e serializáveis
 │   └── training.py             execução local do pipeline completo
 └── bench/
-    └── latency.py              medição de latência com percentis
+    └── latency.py              medição e comparação de latência entre backends
 
 dags/
 └── triagem_training_dag.py     topologia da DAG de treino no Airflow
@@ -494,6 +610,7 @@ docker/
 └── grafana/                    fonte de dados e dashboard provisionados por arquivo
 
 docs/
+├── images/                     capturas da stack em execução
 ├── ml_canvas.md                arquitetura de decisão do projeto, nos 10 blocos de Dorard
 ├── model_card.md               uso pretendido, limitações e riscos do modelo servido
 └── monitoring_plan.md          o que cada métrica significa, limiar de alerta e playbook
@@ -508,4 +625,4 @@ comparação entre backends uma medição do sistema real em vez de um script pa
 - [x] **Etapa 1** — Modelo, API FastAPI, container e baseline de latência
 - [x] **Etapa 2** — CI/CD no GitHub Actions e DAG de treino no Airflow
 - [x] **Etapa 3** — Métricas Prometheus e dashboard Grafana
-- [ ] **Etapa 4** — Exportação ONNX, quantização e comparativo de latência
+- [x] **Etapa 4** — Exportação ONNX, quantização e comparativo de latência
