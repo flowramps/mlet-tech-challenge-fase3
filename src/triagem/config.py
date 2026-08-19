@@ -27,7 +27,12 @@ class Settings(BaseSettings):
     model_filename: str = "model.joblib"
     onnx_filename: str = "model.onnx"
     onnx_int8_filename: str = "model.int8.onnx"
-    model_backend: str = "sklearn"
+
+    # Padrão `onnx` desde a Etapa 4: é o backend mais rápido (6,7x no p50) e a suíte exige
+    # paridade de rótulos com o scikit-learn, então a troca não muda a resposta. `sklearn`
+    # segue disponível e a imagem carrega os dois artefatos — alternar em tempo de execução
+    # é o que permite comparar os backends no Grafana, medindo o serviço real.
+    model_backend: str = "onnx"
     model_version: str = "1.0.0"
 
     # Piso de qualidade para promover um modelo recém-treinado. Calibrado em 0,53 a partir

@@ -103,3 +103,27 @@ def quantize_dynamic_int8(source: Path | str, destination: Path | str) -> Path:
         100 * caminho.stat().st_size / origem.stat().st_size,
     )
     return caminho
+
+
+def main() -> None:
+    """Reexporta o modelo publicado, fora do pipeline de treino.
+
+    O caminho normal é a exportação sair da DAG, a jusante da promoção. Este comando existe
+    para regerar o ``.onnx`` sem retreinar — depois de mudar o conversor, por exemplo, ou de
+    clonar o repositório com um ``model.joblib`` já treinado.
+    """
+    from triagem.config import get_settings
+    from triagem.pipeline.steps import export_onnx
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    settings = get_settings()
+
+    if not settings.model_path.exists():
+        raise SystemExit(f"nenhum modelo publicado em {settings.model_path} — rode `make train`")
+
+    artefatos = export_onnx(settings.model_path, settings.onnx_path, settings.onnx_int8_path)
+    logger.info("artefatos gerados: %s", artefatos)
+
+
+if __name__ == "__main__":
+    main()

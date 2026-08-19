@@ -53,6 +53,19 @@ def test_metadados_viajam_dentro_do_proprio_grafo(classificador):
     assert classificador.model_type == "logistic_regression"
 
 
+def test_load_recusa_grafo_sem_rotulos(pipeline, tmp_path: Path):
+    """Um grafo sem o mapa de rótulos precisa falhar na carga, não na primeira predição.
+
+    Sem esta checagem o serviço sobe normalmente e só quebra quando o primeiro laudo chega —
+    com um `IndexError` que não diz nada sobre a causa. Falhar na carga transforma um
+    incidente em produção num erro de inicialização, que o healthcheck pega antes do tráfego.
+    """
+    sem_metadados = export_pipeline(pipeline, tmp_path / "sem_rotulos.onnx")
+
+    with pytest.raises(ValueError, match="rótulos"):
+        OnnxClassifier.load(sem_metadados)
+
+
 def test_predict_devolve_uma_predicao_por_texto(classificador):
     resultado = classificador.predict(["acute myocardial infarction", "malignant tumor"])
     assert len(resultado) == 2

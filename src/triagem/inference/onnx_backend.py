@@ -57,6 +57,13 @@ class OnnxClassifier:
             int(chave): valor
             for chave, valor in json.loads(metadados.get("triagem_labels", "{}")).items()
         }
+        if not rotulos:
+            raise ValueError(
+                f"{path} não carrega o mapa de rótulos em metadata_props — foi exportado sem "
+                "`labels_by_id`. Sem ele o backend responderia índices em vez de condições. "
+                "Regere o artefato com `make export-onnx`."
+            )
+
         return cls(
             sessao,
             rotulos,
