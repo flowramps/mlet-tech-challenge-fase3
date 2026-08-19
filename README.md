@@ -279,14 +279,14 @@ nuvem sem provisionar recursos, então o gatilho automático está desligado de 
 
 ### Pipeline de treino
 
-A DAG `triagem_training` encadeia seis tarefas. `avaliar_incumbente` só depende do corpus, não
+A DAG `triagem_training` encadeia sete tarefas. `avaliar_incumbente` só depende do corpus, não
 do treino dos candidatos, então roda em paralelo com `preparo`/`treino`/`selecao` em vez de
 esperá-los:
 
 ```
 ingestao --+--> preparo --> treino --> selecao --+
            |                                      |
-           +--> avaliar_incumbente ---------------+--> publicacao
+           +--> avaliar_incumbente ---------------+--> publicacao --> exportacao
 ```
 
 | Tarefa | Responsabilidade |
@@ -297,6 +297,7 @@ ingestao --+--> preparo --> treino --> selecao --+
 | `selecao` | Escolhe o campeão e mede o desempenho (f1-macro, recall de prioridade alta) no teste |
 | `avaliar_incumbente` | Mede o mesmo desempenho do modelo *hoje em produção*, do zero, no mesmo teste |
 | `publicacao` | Decide a promoção pelo gate de 4 critérios e registra o resultado no histórico |
+| `exportacao` | Converte o modelo recém-promovido para ONNX, com a variante INT8 |
 
 A DAG é um invólucro fino: cada tarefa delega para uma função de
 `src/triagem/pipeline/steps.py`, testada isoladamente na suíte. O que a DAG declara é a
@@ -506,7 +507,7 @@ make airflow-test    # executa a DAG de ponta a ponta (~40s)
 make airflow-down
 ```
 
-O Airflow sobe em **um único container** (`LocalExecutor` com SQLite): uma DAG de seis
+O Airflow sobe em **um único container** (`LocalExecutor` com SQLite): uma DAG de sete
 tarefas não justifica um container de banco só para a demonstração.
 
 Ele tem compose próprio, separado da stack de observabilidade, e a razão é prática: quem
@@ -553,8 +554,8 @@ curl -X POST localhost:8000/predict \
   "priority": "alta",
   "priority_source": "regra_de_negocio",
   "model_version": "1.0.0",
-  "backend": "sklearn",
-  "inference_ms": 1.04
+  "backend": "onnx",
+  "inference_ms": 0.086
 }
 ```
 
