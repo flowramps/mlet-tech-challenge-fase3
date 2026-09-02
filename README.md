@@ -474,6 +474,40 @@ make bench       # compara a latência dos backends -> metrics/latency_compariso
 make help        # lista todos os alvos
 ```
 
+### Percurso completo, do zero à demonstração
+
+Para quem quer reproduzir o projeto inteiro de uma vez, esta é a ordem — cada bloco é
+independente do seguinte, e as seções abaixo detalham cada um.
+
+| # | Comandos | Tempo | O que confirma |
+|---|---|---|---|
+| 1 | `make install` | ~2 min | Ambiente pronto |
+| 2 | `make lint` · `make test` | ~1 min | O mesmo que o CI verifica |
+| 3 | `make data` · `make train` | ~2 min | Treino, gate de qualidade e promoção |
+| 4 | `make bench` | ~30 s | O ganho do ONNX sobre o sklearn |
+| 5 | `make api` + `curl` | ~1 min | A API servindo predições |
+| 6 | `make docker-build` · `make monitoring-up` · `make traffic` | ~3 min | Dashboard do Grafana com tráfego |
+| 7 | `make airflow-up` · `make airflow-test` | ~5 min | A DAG de treino de ponta a ponta |
+
+Lembre de derrubar as stacks ao final: `make monitoring-down` e `make airflow-down`.
+
+Duas coisas que costumam gerar dúvida ao repetir os passos:
+
+- **`make train` rodado de novo não falha.** Se nenhum candidato superar o campeão em
+  produção, ele reporta *"nada a promover"* e encerra com sucesso — situação diferente de
+  um gate reprovado, que aí sim falha. Para forçar uma promoção, apague `models/model.joblib`.
+- **`make test` não depende de `make train`.** A suíte usa classificadores falsos e dados
+  sintéticos, então roda em segundos, sem rede e sem modelo treinado.
+
+Credenciais das interfaces web, todas de desenvolvimento:
+
+| Serviço | Endereço | Credencial |
+|---|---|---|
+| API (Swagger) | http://localhost:8000/docs | — |
+| Prometheus | http://localhost:9090 | — |
+| Grafana | http://localhost:3000 | `admin` / `admin` |
+| Airflow | http://localhost:8080 | `admin` / `admin` |
+
 ### Testes e lint
 
 ```bash
@@ -502,10 +536,32 @@ make docker-run
 ### Pipeline de treino no Airflow
 
 ```bash
-make airflow-up      # http://localhost:8080 — usuário admin, senha admin
-make airflow-test    # executa a DAG de ponta a ponta (~40s)
+make airflow-up      # constrói e sobe; ~1 min até responder
+make airflow-test    # executa a DAG de ponta a ponta (~40 s)
 make airflow-down
 ```
+
+| Serviço | Endereço |
+|---|---|
+| Airflow | http://localhost:8080 — usuário `admin`, senha `admin` |
+
+O `make airflow-up` retorna assim que o container inicia, mas a UI leva mais alguns
+segundos para responder. Para esperar o serviço ficar pronto de fato:
+
+```bash
+docker compose -f docker-compose.airflow.yml ps   # aguarde STATUS "healthy"
+```
+
+A senha da UI é fixada de propósito. O `standalone` do Airflow 3 autentica pelo
+`SimpleAuthManager`, que **sorteia uma senha nova a cada container** e a grava em
+`simple_auth_manager_passwords.json.generated` — e ignora as variáveis
+`_AIRFLOW_WWW_USER_*`, que são do Airflow 2. Como o `init()` do manager só sorteia senha
+para usuário ausente do arquivo, a imagem embute um
+[arquivo de senhas](docker/airflow/simple_auth_manager_passwords.json) já com o admin, e o
+compose aponta `AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE` para ele. É uma
+credencial de desenvolvimento em texto puro: o `SimpleAuthManager` é dev-only por design e
+o próprio Airflow desaconselha usá-lo em produção — num deploy real entraria um auth
+manager com identidade corporativa.
 
 O Airflow sobe em **um único container** (`LocalExecutor` com SQLite): uma DAG de sete
 tarefas não justifica um container de banco só para a demonstração.
@@ -605,7 +661,9 @@ dags/
 └── triagem_training_dag.py     topologia da DAG de treino no Airflow
 
 docker/
-├── airflow/Dockerfile          imagem do Airflow com as dependências de ML do projeto
+├── airflow/
+│   ├── Dockerfile              imagem do Airflow com as dependências de ML do projeto
+│   └── simple_auth_manager_passwords.json   credencial fixa da UI (dev-only)
 ├── prometheus/prometheus.yml   alvo e intervalo de coleta de métricas
 └── grafana/                    fonte de dados e dashboard provisionados por arquivo
 

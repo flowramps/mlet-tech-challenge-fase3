@@ -48,7 +48,7 @@ docker-run:       ## Sobe a API em container
 # (data/, models/, metrics/) pertençam a quem executou, e não a uid 50000.
 export AIRFLOW_UID := $(shell id -u)
 
-airflow-up:       ## Sobe o Airflow (http://localhost:8080, admin/admin)
+airflow-up:       ## Sobe o Airflow (http://localhost:8080, admin/admin) — leva ~1 min
 	mkdir -p data/raw data/interim models/candidates metrics
 	docker compose -f docker-compose.airflow.yml up -d --build
 

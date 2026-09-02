@@ -32,8 +32,11 @@ services:
       TRIAGEM_METRICS_DIR: /opt/airflow/metrics
       TRIAGEM_MIN_F1_MACRO: "0.53"
       TRIAGEM_MIN_PRIORITY_RECALL_ALTA: "0.72"
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: admin
+      # Credencial da UI: admin/admin. O SimpleAuthManager do Airflow 3 sortearia uma
+      # senha por container; apontá-lo para o arquivo semeado na imagem (ver
+      # docker/airflow/Dockerfile) fixa a senha. Dev-only por design — o manager guarda
+      # a senha em texto puro e o próprio Airflow desaconselha usá-lo em produção.
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_manager_passwords.json
     volumes:
       - ./dags:/opt/airflow/dags:ro
       - ./src:/opt/airflow/src:ro
